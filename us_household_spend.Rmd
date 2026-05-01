@@ -1,0 +1,632 @@
+---
+title: "US Household Spending Analysis"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    theme: default
+    source_code: embed
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(flexdashboard)
+library(tidyverse)
+library(plotly)
+library(scales)
+library(htmltools)
+```
+
+```{r}
+
+data <- read_xlsx("data/cu-income-before-taxes-2024.xlsx", skip = 2)
+
+brackets <- c("all", "lt15k", "15_30k", "30_40k", "40_50k", 
+               "50_70k", "70_100k", "100_150k", "150_200k", "200k_plus")
+
+colnames(data) <- c("item", brackets)
+
+rows_of_interest <- c(6, 48, 53, 190, 392, 453, 479)
+labels <- c("annual_income", "total_spend", "food", 
+            "housing", "transport", "healthcare", "entertainment")
+
+bls_data <- data %>%
+  mutate(row = row_number()) %>%
+  filter(row %in% rows_of_interest) %>%
+  mutate(category = labels) %>%
+  select(category, `15_30k`:`200k_plus`) %>%
+  pivot_longer(-category, names_to = "bracket", values_to = "value") %>%
+  mutate(value = as.numeric(value)) %>%
+  pivot_wider(names_from = category, values_from = value) %>%
+  mutate(
+    savings = annual_income - total_spend,
+    savings_rate = savings / annual_income,
+    spend_ratio = total_spend / annual_income,
+    income_bracket = factor(bracket,
+                            levels = c("15_30k", "30_40k", "40_50k",
+                                       "50_70k", "70_100k", "100_150k",
+                                       "150_200k", "200k_plus"),
+                            labels = c("$15-30k", "$30-40k", "$40-50k",
+                                       "$50-70k", "$70-100k", "$100-150k",
+                                       "$150-200k", "$200k+"))
+  )
+
+```
+
+```{r}
+
+spend_long <- bls_data %>% 
+  select(income_bracket, food, housing, transport,
+         healthcare, entertainment) %>% 
+  pivot_longer(-income_bracket,
+               names_to = "category",
+               values_to = "amount") %>% 
+  mutate(category = str_to_title(category))
+
+```
+
+
+
+```{r}
+
+pal <- c("#00e5a0", "#7b5ea7", "#ff6b35", "#4ecdc4", "#ffe66d", "#a8e6cf")
+
+```
+
+```{css}
+.card-title {
+  font-size: 0.95rem !important;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.card-body {
+  font-size: 2.8rem !important;
+  font-weight: 700 !important;
+}
+
+.chart-stage table,
+.chart-stage-flex table,
+body table {
+  width: 100% !important;
+  font-size: 1.1rem !important;
+  border-collapse: collapse !important;
+}
+
+.chart-stage th,
+.chart-stage-flex th,
+body th {
+  background-color: #1a1a2e !important;
+  color: #00e5a0 !important;
+  padding: 0.85rem 1.2rem !important;
+  text-align: left !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  font-size: 0.9rem !important;
+}
+
+.chart-stage td,
+.chart-stage-flex td,
+body td {
+  padding: 0.85rem 1.2rem !important;
+  border-bottom: 1px solid #2a2a3a !important;
+  vertical-align: top !important;
+  line-height: 1.7 !important;
+  font-size: 1.1rem !important;
+}
+
+tr:hover td {
+  background-color: rgba(0, 229, 160, 0.05) !important;
+}
+```
+
+Overview
+=====================================
+
+Row {data-height=140}
+-------------------------------------
+
+### Median Annual Income
+
+```{r}
+
+median_inc <- median(bls_data$annual_income)
+valueBox(dollar(median_inc, accuracy = 1), color = "#1a1a2e")
+
+```
+
+### Median Savings Rate
+
+```{r}
+
+median_sar <- median(bls_data$savings_rate)
+valueBox(percent(median_sar, accuracy = 0.1), color = "#1a1a2e")
+
+```
+
+### Median Spend Ratio
+
+```{r}
+
+median_spr <- median(bls_data$spend_ratio)
+valueBox(percent(median_spr, accuracy = 0.1), color = "#1a1a2e")
+
+```
+
+
+### Brackets Running Deficit
+
+```{r}
+
+deficit_count <- sum(bls_data$savings < 0)
+valueBox(deficit_count, color = "#1a1a2e")
+
+```
+
+
+Row {data-height=430}
+-------------------------------------
+
+### Spend Ratio Across Income Brackets
+
+```{r}
+
+plot_ly(bls_data,
+        x = ~income_bracket,
+        y = ~spend_ratio,
+        type = "scatter",
+        mode = "lines+markers",
+        line = list(color = "#00e5a0", width = 3),
+        markers = list(color = "#00e5a0", size = 8),
+        hovertemplate =  "Bracket: %{x}<br>Spend Ratio: %{y:.1%}<extra></extra>") %>% 
+  layout(
+    shapes = list(list(
+      type = "line", x0 = 0, x1 = 1, xref = "paper",
+      y0 = 1, y1 = 1,
+      line = list(color = "#ff6b35", dash = "dash", width = 2)
+    )),
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Spend Ratio", tickformat = ".0%")
+  )
+
+
+```
+
+Row {data-height=430}
+-------------------------------------
+
+### Income vs. Average Annual Spend
+
+```{r}
+
+plot_ly(bls_data) %>% 
+  add_trace(x = ~income_bracket, y = ~annual_income,
+            type = "bar", name = "Income",
+            marker = list(color = "#00e5a0"),
+            hovertemplate = "Income: %{y:$,.0f}<extra></extra>") %>% 
+  add_trace(x = ~income_bracket, y = ~total_spend,
+            type = "bar", name = "Total Spend",
+            marker = list(color = "#ff6b35"),
+            hovertemplate = "Spend: %{y:$,.0f}<extra></extra>") %>% 
+  layout(
+    barmode = "group",
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Amount ($)", tickformat = "$,.0f"),
+    legend = list(orientation = "h", y = -0.3)
+  )
+
+```
+
+Where Does Money Go?
+=====================================
+
+Row {data-height=500}
+-------------------------------------
+
+### Spending Category Breakdown by Bracket
+
+```{r}
+
+plot_ly(spend_long,
+        x      = ~income_bracket,
+        y      = ~amount,
+        color  = ~category,
+        colors = pal,
+        type   = "bar",
+        hovertemplate = "<b>%{x}</b><br>%{fullData.name}: %{y:$,.0f}<extra></extra>") %>%
+  layout(
+    barmode = "stack",
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Avg Annual Spend ($)", tickformat = "$,.0f"),
+    legend = list(orientation = "h", y = -0.25)
+  )
+
+```
+
+
+Row {data-height=500}
+-------------------------------------
+
+### Category as % of Income
+```{r}
+
+pct_data <- bls_data %>%
+  mutate(
+    Housing       = housing / annual_income,
+    Food          = food / annual_income,
+    Transport     = transport / annual_income,
+    Healthcare    = healthcare / annual_income,
+    Entertainment = entertainment / annual_income
+  ) %>%
+  select(income_bracket, Housing, Food, Transport, Healthcare, Entertainment)
+
+mat2 <- pct_data %>% select(-income_bracket) %>% as.matrix()
+rownames(mat2) <- as.character(pct_data$income_bracket)
+
+plot_ly(
+  x = colnames(mat2),
+  y = rownames(mat2),
+  z = mat2,
+  type = "heatmap",
+  colorscale = list(c(0,"#1a1a2e"), c(0.5,"#7b5ea7"), c(1,"#00e5a0")),
+  hovertemplate = "%{y}<br>%{x}: %{z:.1%}<extra></extra>"
+) %>%
+  layout(
+    xaxis = list(title = "Category"),
+    yaxis = list(title = "Income Bracket")
+  )
+
+```
+
+
+### Overall Spending Share
+
+```{r}
+
+category_totals <- spend_long %>%
+  group_by(category) %>%
+  summarise(total = sum(amount), .groups = "drop")
+
+plot_ly(category_totals,
+        labels  = ~category,
+        values  = ~total,
+        type    = "pie",
+        marker  = list(colors = pal,
+                       line = list(color = "#0a0a0f", width = 1)),
+        textinfo = "label+percent",
+        hovertemplate = "<b>%{category}</b><br>Total: %{total:$,.0f}<extra></extra>") %>%
+  layout(
+    legend = list(orientation = "h", y = -0.2)
+  )
+
+
+```
+
+The Housing Burden
+=====================================
+
+Row {data-height=500}
+-------------------------------------
+
+### Housing Cost by Income Bracket
+
+```{r}
+
+plot_ly(bls_data,
+        x = ~income_bracket,
+        y = ~housing,
+        type = "bar",
+        marker = list(color = ~ifelse(
+          housing / annual_income > 0.30, "#ff6b35", "#00e5a0")),
+        hovertemplate = "Bracket: %{x}<br>Housing: %{y:$,.0f}<extra></extra>") %>%
+  layout(
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Housing Spend ($)", tickformat = "$,.0f"),
+    annotations = list(list(
+      x = 0.02, y = 0.98, xref = "paper", yref = "paper",
+      text = "🔴 Above 30% income = cost burdened",
+      showarrow = FALSE, font = list(size = 11, color = "#ff6b35")
+    ))
+  )
+```
+
+### Housing as % of Income
+
+```{r}
+
+plot_ly(bls_data,
+        x    = ~income_bracket,
+        y    = ~housing / annual_income,
+        type = "scatter",
+        mode = "lines+markers",
+        line   = list(color = "#00e5a0", width = 3),
+        marker = list(color = "#00e5a0", size = 8),
+        hovertemplate = "Bracket: %{x}<br>Housing: %{y:.1%}<extra></extra>") %>%
+  layout(
+    shapes = list(list(
+      type = "line", x0 = 0, x1 = 1, xref = "paper",
+      y0 = 0.30, y1 = 0.30,
+      line = list(color = "#ff6b35", dash = "dash", width = 2)
+    )),
+    annotations = list(list(
+      x = 0.01, y = 0.32, xref = "paper", yref = "y",
+      text = "HUD Cost Burden Threshold (30%)",
+      showarrow = FALSE, font = list(size = 11, color = "#ff6b35")
+    )),
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Housing as % of Income", tickformat = ".0%")
+  )
+
+```
+
+
+Row {data-height=250}
+-------------------------------------
+
+### Housing Insight
+
+```{r}
+
+housing_burdened <- sum(bls_data$housing / bls_data$annual_income > 0.30)
+
+findings_housing <- tibble(
+  Finding = c(
+    "Cost-burdened brackets",
+    "Worst affected bracket",
+    "Breakeven point",
+    "Top earner housing spend",
+    "HUD definition"
+  ),
+  Insight = c(
+    paste0(housing_burdened, " of 8 income brackets spend over 30% of income on housing"),
+    paste0("$15-30k households spend ",
+           percent(bls_data$housing[bls_data$bracket == "15_30k"] /
+                   bls_data$annual_income[bls_data$bracket == "15_30k"],
+                   accuracy = 0.1), " of income on housing alone"),
+    "$70-100k is where housing drops below the 30% cost burden threshold",
+    paste0("$200k+ households spend ",
+           dollar(bls_data$housing[bls_data$bracket == "200k_plus"], accuracy = 1),
+           " on housing — 3x the lowest bracket in absolute terms"),
+    "HUD defines 'cost burdened' as spending more than 30% of income on housing"
+  )
+)
+
+knitr::kable(findings_housing, align = c("l", "l"))
+
+```
+
+Savings & Deficits
+=====================================
+
+Row {data-height=500}
+-------------------------------------
+
+### Savings by Income Bracket
+
+```{r}
+
+plot_ly(bls_data,
+        x = ~income_bracket,
+        y = ~savings,
+        type = "bar",
+        marker = list(color = ~ifelse(savings < 0, "#ff6b35", "#00e5a0")),
+        hovertemplate = "Bracket: %{x}<br>Savings: %{y:$,.0f}<extra></extra>") %>% 
+  layout(
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Avg Savings ($)", tickformat = "$,.0f")
+  )
+
+```
+
+### Savings Rate Across Brackets
+
+```{r}
+
+plot_ly(bls_data,
+        x = ~income_bracket,
+        y = ~savings_rate,
+        type = "scatter",
+        mode = "lines+markers",
+        line = list(color = "#00e5a0", width = 3),
+        marker = list(color = "#00e5a0", size = 8),
+        hovertemplate = "Bracket: %{x}<br>Savings: %{y:.1%}<extra></extra>") %>%
+  layout(
+    shapes = list(list(
+      type = "line", x0 = 0, x1 = 1, xref = "paper",
+      y0 = 0, y1 = 0,
+      line = list(color = "#ff6b35", dash = "dash", width = 2)
+    )),
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Savings Rate", tickformat = ".0%")
+  )
+
+```
+
+
+Row {data-height=280}
+-------------------------------------
+
+### Savings Insight
+
+```{r}
+
+findings_savings <- tibble(
+  Finding = c(
+    "Brackets running deficit",
+    "Worst deficit",
+    "Breakeven bracket",
+    "Best saving bracket",
+    "Savings wealth gap"
+  ),
+  Insight = c(
+    paste0(sum(bls_data$savings < 0), " of 8 brackets spend more than they earn"),
+    paste0("$15-30k households run a ",
+           percent(abs(bls_data$savings_rate[bls_data$bracket == "15_30k"]),
+                   accuracy = 0.1), " deficit — spending 62 cents more than every dollar earned"),
+    "$50-70k is where households first break even with a 0.3% savings rate",
+    paste0("$200k+ households save ",
+           percent(bls_data$savings_rate[bls_data$bracket == "200k_plus"],
+                   accuracy = 0.1), " of income — ",
+           dollar(bls_data$savings[bls_data$bracket == "200k_plus"], accuracy = 1), " per year"),
+    paste0("Top earners save ",
+           dollar(bls_data$savings[bls_data$bracket == "200k_plus"] -
+                  bls_data$savings[bls_data$bracket == "70_100k"], accuracy = 1),
+           " more per year than middle income households")
+  )
+)
+
+knitr::kable(findings_savings, align = c("l", "l"))
+
+```
+
+Healthcare & Transport
+=====================================
+
+Row {data-height=500}
+-------------------------------------
+
+### Healthcare & Transport: Absolute Spend
+
+```{r}
+
+plot_ly(bls_data) %>%
+  add_trace(x = ~income_bracket,
+            y = ~healthcare,
+            type = "bar",
+            name = "Healthcare",
+            marker = list(color = "#7b5ea7"),
+            hovertemplate = "Bracket: %{x}<br>Healthcare: %{y:$,.0f}<extra></extra>") %>%
+  add_trace(x = ~income_bracket,
+            y = ~transport,
+            type = "bar",
+            name = "Transportation",
+            marker = list(color = "#4ecdc4"),
+            hovertemplate = "Bracket: %{x}<br>Transport: %{y:$,.0f}<extra></extra>") %>%
+  layout(
+    barmode = "group",
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "Annual Spend ($)", tickformat = "$,.0f"),
+    legend = list(orientation = "h", y = -0.3)
+  )
+
+```
+
+### As % of Income
+
+```{r}
+
+plot_ly(bls_data) %>%
+  add_trace(x = ~income_bracket,
+            y = ~healthcare / annual_income,
+            type = "scatter",
+            mode = "lines+markers",
+            name = "Healthcare",
+            line   = list(color = "#7b5ea7", width = 3),
+            marker = list(color = "#7b5ea7", size = 8),
+            hovertemplate = "Bracket: %{x}<br>Healthcare: %{y:.1%}<extra></extra>") %>%
+  add_trace(x = ~income_bracket,
+            y = ~transport / annual_income,
+            type = "scatter",
+            mode = "lines+markers",
+            name = "Transport",
+            line   = list(color = "#4ecdc4", width = 3),
+            marker = list(color = "#4ecdc4", size = 8),
+            hovertemplate = "Bracket: %{x}<br>Transport: %{y:.1%}<extra></extra>") %>%
+  layout(
+    xaxis = list(title = "Income Bracket", tickangle = -45),
+    yaxis = list(title = "% of Income", tickformat = ".0%"),
+    legend = list(orientation = "h", y = -0.3)
+  )
+
+```
+
+
+Row {data-height=280}
+-------------------------------------
+
+### Healthcare & Transport Insight
+
+```{r}
+
+findings_ht <- tibble(
+  Finding = c(
+    "Transport dominates both categories",
+    "Healthcare burden peaks low",
+    "Transport gap top vs bottom",
+    "Healthcare converges at top",
+    "Combined burden"
+  ),
+  Insight = c(
+    paste0("Transport exceeds healthcare spend across all brackets — ",
+           dollar(bls_data$transport[bls_data$bracket == "200k_plus"], accuracy = 1),
+           " vs ",
+           dollar(bls_data$healthcare[bls_data$bracket == "200k_plus"], accuracy = 1),
+           " for top earners"),
+    paste0("$15-30k households spend ",
+           percent(bls_data$healthcare[bls_data$bracket == "15_30k"] /
+                   bls_data$annual_income[bls_data$bracket == "15_30k"], accuracy = 0.1),
+           " of income on healthcare — highest of any bracket"),
+    paste0("Top earners spend ",
+           dollar(bls_data$transport[bls_data$bracket == "200k_plus"] -
+                  bls_data$transport[bls_data$bracket == "15_30k"], accuracy = 1),
+           " more on transport than the lowest bracket"),
+    paste0("Healthcare as % of income falls to ",
+           percent(bls_data$healthcare[bls_data$bracket == "200k_plus"] /
+                   bls_data$annual_income[bls_data$bracket == "200k_plus"], accuracy = 0.1),
+           " for $200k+ households — lowest of any bracket"),
+    paste0("Combined healthcare and transport consume ",
+           percent((bls_data$healthcare[bls_data$bracket == "15_30k"] +
+                    bls_data$transport[bls_data$bracket == "15_30k"]) /
+                   bls_data$annual_income[bls_data$bracket == "15_30k"], accuracy = 0.1),
+           " of income for the lowest bracket")
+  )
+)
+
+knitr::kable(findings_ht, align = c("l", "l"))
+
+```
+Key Findings
+=====================================
+
+Row {data-height=800}
+-------------------------------------
+
+### Summary of Analysis
+
+```{r}
+
+findings_master <- tibble(
+  `#` = 1:7,
+  Finding = c(
+    "Lower income households run financial deficits",
+    "Housing is the dominant burden across all brackets",
+    "The cost burden breakeven is ~$70-100k",
+    "Savings inequality is extreme",
+    "Transport consistently exceeds healthcare spend",
+    "Healthcare burden falls as income rises",
+    "Real wages vs. real costs — a structural problem"
+  ),
+  Detail = c(
+    "Brackets earning under $50k spend more than they earn — deficits range from 12% to 62% of income, based on 2024 BLS Consumer Expenditure Survey data",
+    "Housing consumes 40%+ of total spend for all brackets and exceeds the HUD cost burden threshold of 30% of income for the bottom 5 of 8 brackets",
+    "Only households earning $70k+ begin to meaningfully save — the $50-70k bracket barely breaks even at a 0.3% savings rate",
+    "$200k+ households save $151,420/year vs. a deficit of $13,925 for $15-30k households — a gap of over $165,000 in annual financial position",
+    "Transport spend exceeds healthcare across every income bracket — lowest earners spend 25% of income on transport alone",
+    "Healthcare as % of income falls from 16.4% at the lowest bracket to 3.2% at the highest — a 5x difference in relative burden",
+    "These patterns reflect structural cost pressures in housing and transport that disproportionately affect lower income households regardless of spending choices"
+  )
+)
+
+knitr::kable(findings_master, align = c("c", "l", "l"))
+
+```
+
+---
+
+**Data Source:** US Bureau of Labor Statistics, Consumer Expenditure Survey 2024.
+Table 1203 — Income before taxes: Annual expenditure means, shares, standard errors,
+and relative standard errors. Retrieved from [https://www.bls.gov/cex/tables.htm](https://www.bls.gov/cex/tables.htm)
+
+**Note:** Savings calculated as income minus total expenditures. Negative savings
+indicate expenditure exceeds reported income, which may reflect debt, asset drawdown,
+or underreporting of income — a known limitation of the CE Survey methodology.
