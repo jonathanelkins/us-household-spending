@@ -1,0 +1,668 @@
+---
+title: "Day 1 as a Business Analyst: Understanding the Financial Landscape"
+author: "Jonathan Elkins"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+
+set.seed(42)
+
+
+```
+
+```{r, libraries}
+
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(ggthemes)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+
+```
+
+# Setting the Scene
+
+It is my first day. I have been handed a folder, or more likely a SharePoint link, with the words "here is what we have, get familiar."
+
+My job right now is not to have answers, but it is to ask the right questions. Before I can flag a problem, recommend a cut, or build a model, I need to understand the shape of this business. That means working through four lenses:
+
+1. **Revenue & Margin** - Are we growing? Is that growth profitable?
+2. **Budget vs. Actual** - Where are we spending differently than planned?
+3. **Headcount & Labor** - Are we staffed efficiently?
+4. **Unit Economics** - What does it actually cost to serve a customer?
+
+I am going to walk through each one out loud, showing my code, my reasoning, and the questions each chart raises. By the end I want a short list of things to follow up on in my first week.
+
+> **Note on data:** The data here is synthetic but built to mirror realistic 
+> patterns. Seasonality, deparmental cost structures, headcount ratios, margin
+> profiles you would actually encounter. The code is fully reproducible and
+> the patterns are real even if the numbers are not.
+
+# Generating the Data
+
+Before I dig in I need to build the dataset. In a real job this is where I would be connecting to a data warehouse, pulling from NetSuite or QuickBooks exports, or working with a financial analyst to get clean CSVs. Here I will generate everything from scratch so you can see exactly the structure I am expecting to work with.
+
+```{r generate-data}
+
+months <- seq.Date(from = as.Date("2023-01-01"), by = "month", length.out = 24)
+
+monthly_pl <- tibble(
+  month = months,
+  revenue = 650000 * (1 + 0.015 * (1:24)) *
+    (1 + 0.08 * sin((month(months) - 3) * pi / 6)) +
+    rnorm(24, 0, 15000),
+  cogs = revenue * (0.52 - 0.003 * (1:24) / 24) + rnorm(24, 0, 8000),
+  opex_salaries = 180000 + 2500 * (1:24) + rnorm(24, 0, 5000), 
+  opex_marketing = 45000 + 800 * (1:24) + rnorm(24, 0, 3000),
+  opex_tech      = 28000 + 400 * (1:24) + rnorm(24, 0, 1500),
+  opex_facilities = 32000 + rnorm(24, 0, 1000),
+  opex_other      = 18000 + 300 * (1:24) + rnorm(24, 0, 2000)
+) %>% 
+  mutate(
+    gross_profit = revenue - cogs,
+    gross_margin = gross_profit / revenue,
+    total_opex = opex_salaries + opex_marketing + opex_tech + opex_facilities + opex_other,
+    ebitda = gross_profit - total_opex,
+    ebitda_margin = ebitda / revenue,
+    year = year(month),
+    month_label = format(month, "%b %Y")
+  )
+
+```
+
+
+```{r budget-data}
+
+current_years_months <- months[year(months) == 2024]
+
+budget_vs_actual <- tibble(
+  month = rep(current_years_months, 5),
+  department = rep(c("Sales", "Marketing", "Engineering", "G&A", "Customer Success"), each = length(current_years_months))
+) %>% 
+  mutate(
+    budget = case_when(
+      department == "Sales"            ~ 95000  + 1000  * as.integer(factor(month)), 
+      department == "Marketing"        ~ 48000  + 500   * as.integer(factor(month)), 
+      department == "Engineering"      ~ 120000 + 800   * as.integer(factor(month)),  
+      department == "G&A"              ~ 42000  + 200   * as.integer(factor(month)), 
+      department == "Customer Success" ~ 35000  + 300   * as.integer(factor(month)) 
+    ),
+    variance_pct = case_when(
+      department == "Sales"            ~ rnorm(n(), 0.06,  0.04), 
+      department == "Marketing"        ~ rnorm(n(), 0.12,  0.05), 
+      department == "Engineering"      ~ rnorm(n(), -0.03, 0.03),  
+      department == "G&A"              ~ rnorm(n(), 0.02,  0.02),
+      department == "Customer Success" ~ rnorm(n(), -0.05, 0.03)
+    ),
+    actual = budget * (1 + variance_pct),
+    variance = actual - budget
+  )
+```
+
+```{r headcount-data}
+headcount <- tibble(
+  department = c("Sales", "Marketing", "Engineering", "G&A", "Customer Success"),
+  headcount = c(22, 8, 31, 9, 14),
+  avg_salary = c(82000, 78000, 115000, 72000, 68000),
+  avg_tenure_yrs = c(2.1, 1.8, 3.4, 4.2, 2.7),
+  open_reqs      = c(3, 1, 5, 0, 2),
+  attrition_rate = c(0.18, 0.22, 0.12, 0.08, 0.25)
+) %>% 
+  mutate(
+    total_labor_cost = headcount * avg_salary,
+    fully_loaded = total_labor_cost * 1.25
+  )
+
+```
+
+```{r unit-econ data}
+
+unit_econ <- tibble(
+ month             = months,
+  new_customers     = round(120 + 4 * (1:24) + rnorm(24, 0, 12)),
+  churned_customers = round(40 + 1.5 * (1:24) + rnorm(24, 0, 4)),
+  sales_marketing_spend = monthly_pl$opex_salaries * 0.35 +
+                          monthly_pl$opex_marketing
+) %>% 
+  mutate(
+    total_customers   = cumsum(new_customers - churned_customers) + 800,
+    cac               = sales_marketing_spend / pmax(new_customers, 1),
+    arpu              = (monthly_pl$revenue / total_customers) * 0.25,
+    churn_rate        = churned_customers / total_customers,
+    ltv               = arpu / pmax(churn_rate, 0.001) * 0.70,
+    ltv_cac_ratio     = ltv / cac,
+    cogs_per_customer = monthly_pl$cogs / total_customers
+  )
+
+```
+
+```{r data-check}
+
+glimpse(monthly_pl)
+glimpse(budget_vs_actual)
+glimpse(headcount)
+glimpse(unit_econ)
+
+```
+
+```{r theme-setup}
+
+theme_ba <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14,
+                                margin = margin(b = 8)),
+      plot.subtitle = element_text(color = "grey40", size = 11,
+                                   margin = margin(b = 12)),
+      plot.caption = element_text(color = "grey55", size = 9,
+                                  margin = margin(t = 10)),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92"),
+      axis.text        = element_text(color = "grey40"),
+      legend.position  = "bottom",
+      strip.text       = element_text(face = "bold", size = 11)
+    )
+}
+
+pallete_dept <- c(
+  "Sales"            = "#2E86AB",
+  "Marketing"        = "#A23B72",
+  "Engineering"      = "#F18F01",
+  "G&A"              = "#C73E1D",
+  "Customer Success" = "#3B1F2B"
+)
+
+```
+
+# Revenue & Margin Analysis
+
+The first thing I want to see is the revenue trend. Not just the number but the shape. Is growth accelerating or decelerating? Is it smooth or lumpy? Does it show seasonality I need to account for in budget models? A single number tells you where you are. A trend tells you where you are going.
+
+```{r revenue-trend} 
+
+monthly_pl %>% 
+  ggplot(aes(x = month, y = revenue)) +
+  geom_area(fill = "#2E86AB", alpha = 0.15) +
+  geom_line(color = "#2E86AB", linewidth = 1.2) +
+  geom_point(color = "#2E86AB", size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE, color = "grey40",
+              linetype = "dashed", linewidth = 0.8) +
+  scale_y_continuous(labels = dollar_format(scale = 1e-3, suffix = "K"))+
+  scale_x_date(date_labels = "%b `%y", date_breaks = "3 months") +
+  labs(
+    title = "Monthly Revenue - 24 Month Trend",
+    subtitle = "Dashed line shows linear trend | Revenue softer in Q4 each year",
+    x = NULL,
+    y = "Revenue",
+    caption = "Source: Internal P&L"
+  ) + 
+  theme_ba()
+
+```
+
+```{r gross-margin}
+
+monthly_pl %>% 
+  ggplot(aes(x = month, y = gross_margin)) +
+  geom_line(color = "#27AE60", linewidth = 1.2) +
+  geom_point(color = "#27AE60", size = 2.5) +
+  geom_hline(yintercept = mean(monthly_pl$gross_margin),
+             linetype = "dashed", color = "grey50") +
+  annotate("text",
+           x     = min(monthly_pl$month) + 30,
+           y     = mean(monthly_pl$gross_margin) + 0.004,
+           label = paste0("Avg: ", percent(mean(monthly_pl$gross_margin),
+                                           accuracy = 0.1)),
+           color = "grey40", size = 3.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1),
+                     limits = c(0.44, 0.52)) +
+  scale_x_date(date_labels = "%b '%y", date_breaks = "3 months") +
+  labs(
+    title = "Gross Margin % - 24 Month Trend",
+    subtitle = "Volatile in 2023, stabilizing above average through 2024",
+    x = NULL,
+    y = "Gross Margin %",
+    caption = "Gross Margin = (Revenue - COGS) / Revenue"
+  ) +
+  theme_ba()
+
+```
+
+Gross margin tells me about the core business. EBITDA tells me about the whole operation. After we pay our people, run our marketing, and keep the lights on, what is actually left? This is where I find out if the growth we saw in revenue is translating to the bottom line.
+
+```{r ebitda-margin}
+
+monthly_pl %>% 
+  ggplot(aes(x = month, y = ebitda_margin,
+             fill = ebitda_margin >= 0)) +
+  geom_col(alpha = 0.85) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  scale_x_date(date_labels = "%b '%y", date_breaks = "3 months") +
+  scale_fill_manual(values = c("TRUE" = "#27AE60", "FALSE" = "#E74C3C"),
+                    guide = "none") +
+  labs(
+    title    = "EBITDA Margin % — Monthly",
+    subtitle = "Green = profitable months | Red = operating loss",
+    x = NULL,
+    y = "EBITDA Margin %",
+    caption  = "EBITDA = Gross Profit minus all Operating Expenses"
+  ) +
+  theme_ba()
+
+```
+
+# Budget vs. Actual Variance Analysis
+
+This is often where a new analyst can add immediate value. The budget was set months ago by people making assumptions about the future. Actuals are what actually happened. The gap between them is where the interesting questions live. My job here is not to assign blame but to find the patterns and ask why.
+
+```{r bva-table}
+
+bva_summary <- budget_vs_actual %>% 
+  group_by(department) %>% 
+  summarize(
+    total_budget = sum(budget),
+    total_actual = sum(actual),
+    total_variance = sum(variance),
+    variance_pct = total_variance / total_budget,
+    .groups = 'drop'
+  ) %>% 
+  arrange(desc(variance_pct)) 
+
+bva_summary %>% 
+  mutate(
+    total_budget = dollar(total_budget),
+    total_actual = dollar(total_actual),
+    total_variance = dollar(total_variance),
+    variance_pct = percent(variance_pct, accuracy = 0.1)
+  ) %>% 
+  kable(
+    col.names = c(
+      "Department", "Budget", "Actual",
+      "Variance ($)", "Variance (%)"
+    ),
+    align = c("l", "r", "r", "r", "r")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  )
+
+
+```
+
+Marketing is the biggest concern at 13.2% over budget. Sales is also over but the variance is smaller and more explainable given variable commission structures. Engineering running under is worth a closer look. They have 5 open requisitions sitting unfilled, which means that underspend is likely deferred hiring cost, not actual savings. Customer Success is slightly under which sounds fine until you cross-reference it against their 25% attrition rate. under budget and understaffed is not a good combination.
+
+```{r bva-chart}
+
+bva_summary %>%
+  ggplot(aes(x = reorder(department, variance_pct),
+             y = variance_pct,
+             fill = variance_pct > 0)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = paste0(round(variance_pct * 100, 1), "%"),
+                hjust = ifelse(variance_pct > 0, -0.1, 1.1)),
+            size = 4, fontface = "bold") +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format(),
+                     limits = c(-0.1, 0.15)) +
+  scale_fill_manual(values = c("TRUE" = "#E74C3C", "FALSE" = "#27AE60"),
+                    guide = "none") +
+  labs(
+    title    = "Budget vs. Actual — YTD Variance by Department",
+    subtitle = "Red = overspend | Green = underspend",
+    x = NULL,
+    y = "Variance %",
+    caption  = "2024 YTD | Positive = actual exceeded budget"
+  ) +
+  theme_ba()
+
+```
+
+A single YTD number can hide a lot. I want to see when the overspend happened and whether it is getting better or worse over time. A department that blew its budget in January but has been tightening ever since is a very different conversation than one that keeps drifting further over every month.
+
+```{r bva-monthly}
+budget_vs_actual %>% 
+  filter(department %in% c("Marketing", "Sales", "Customer Success")) %>% 
+  mutate(department = factor(department,
+                             levels = c("Marketing", "Sales",
+                                        "Customer Success"))) %>% 
+  ggplot(aes(x = month, y = variance_pct, color = department)) +
+  geom_line(linewidth = 1.1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  facet_wrap(~department, ncol = 1, scales = "free_y") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_date(date_labels = "%b '%y") +
+  scale_color_manual(values = pallete_dept, guide = "none") +
+  labs(
+    title = "Monthly Variance % - Overspending Departments",
+    subtitle = "Positive = spending above budget | Negative = under budget",
+    x = NULL,
+    y = "Variance %"
+  ) +
+  theme_ba()
+```
+
+
+# Headcount & Labor Cost Analysis
+
+Labor is almost always the largest expense line in a business, often 60 to 70 percent of total OpEx. Understanding who we have, what they cost, and whether we are retaining them is non-negotiable on Day 1. The headcount data also connects directly back to what we just saw in the budget variance section, as departments that are overspending or understaffed show up here too.
+
+```{r headcount-table}
+headcount_display <- headcount %>% 
+  arrange(desc(fully_loaded)) %>% 
+  mutate(
+    avg_salary       = dollar(avg_salary),
+    total_labor_cost = dollar(total_labor_cost),
+    fully_loaded     = dollar(fully_loaded),
+    attrition_rate   = percent(attrition_rate, accuracy = 1)
+  )
+
+headcount_display %>%
+  kable(
+    col.names = c("Department", "Headcount", "Avg Salary",
+                  "Avg Tenure (Yrs)", "Open Reqs", "Attrition %",
+                  "Total Labor", "Fully Loaded"),
+    align = c("l", "r", "r", "r", "r", "r", "r", "r")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE)
+```
+```{r headcount-charts}
+
+p_hc1 <- headcount %>% 
+  ggplot(aes(x = reorder(department, fully_loaded),
+             y = fully_loaded,
+             fill = department)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = dollar(fully_loaded)),
+            hjust = -0.1, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_y_continuous(labels = dollar_format(scale = 1e-6, suffix = "M"),
+                     limits = c(0, max(headcount$fully_loaded) * 1.35)) +
+  scale_fill_manual(values = pallete_dept, guide = "none") +
+  labs(
+    title = "Fully Loaded Labor Cost",
+    subtitle = "Base Salary * 1.25",
+    x = NULL,
+    y = "Annual Cost"
+  ) +
+  theme_ba()
+
+p_hc2 <- headcount %>% 
+  ggplot(aes(x = reorder(department, attrition_rate),
+             y = attrition_rate,
+             fill = attrition_rate >= 0.18)) +
+  geom_col(alpha = 0.85) +
+  geom_text(aes(label = percent(attrition_rate, accuracy = 1)),
+            hjust = -0.1, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format(),
+                     limits = c(0, 0.32)) +
+  scale_fill_manual(values = c("FALSE" = "#27AE60", "TRUE" = "#E74C3C"),
+                    guide = "none") +
+  labs(
+    title = "Annual Attrition Rate",
+    subtitle = "Red = above 18% threshold",
+    x = NULL,
+    y = "Attrition %"
+  ) +
+  theme_ba()
+
+p_hc1 + p_hc2
+
+```
+
+```{r headcount-scatter}
+headcount %>% 
+  ggplot(aes(x = attrition_rate, y = avg_salary,
+             size = headcount, color = department, label = department)) +
+  geom_point(alpha = 0.75) +
+  geom_text(vjust = -1.2, hjust = 0.5, size = 3.5, fontface = "bold") +
+  geom_vline(xintercept = 0.18, linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = mean(headcount$avg_salary),
+             linetype = "dashed", color = "grey50") +
+  annotate("text", x = 0.185, y = 69000,
+           label = "Attrition threshold",
+           color = "grey50", size = 3, hjust = 0) +
+  annotate("text", x = 0.09, 
+           y = mean(headcount$avg_salary) + 3500,
+           label = "Avg Salary",
+           color = "grey50", size = 3) +
+  scale_x_continuous(labels = percent_format(), limits = c(0.07, .28)) +
+  scale_y_continuous(labels = dollar_format(), limits = c(NA, 125000)) +
+  scale_color_manual(values = pallete_dept, guide = "none") +
+  scale_size(range = c(3,10), guide = "none") +
+  labs(
+    title = "Attrition Rate vs. Average Salary",
+    subtitle = "Bubble size = headcount | Top right = expensive and high turnover",
+    x = "Annual Attrition Rate",
+    y = "Average Salary"
+  ) +
+  theme_ba()
+  
+```
+
+# Unit Economics
+
+This is the section most junior analysts skip. Unit economics live at the intersection of finance, product, and operations and understanding them tells you whether the growth we saw in the revenue section is actually sustainable. A business can grow revenue every month and still be destroying value if it costs more to acquire and serve a customer than that customer is ever going to return.
+
+```{r unit-econ-latest}
+latest <- unit_econ %>% 
+  slice_tail(n = 1)
+
+latest
+```
+
+```{r unit-econ-display}
+
+unit_econ_display <- tibble(
+  Metric = c(
+    "Total Customers",
+    "New Customers (Latest Month)",
+    "Churned Customers (Latest Month)",
+    "Customer Acquisition Cost",
+    "Monthly ARPU",
+    "Monthly Churn Rate",
+    "Estimated LTV",
+    "LTV:CAC Ratio"
+  ),
+  Value = c(
+    comma(latest$total_customers),
+    comma(latest$new_customers),
+    comma(latest$churned_customers),
+    dollar(latest$cac),
+    dollar(latest$arpu),
+    percent(latest$churn_rate, accuracy = 0.1),
+    dollar(latest$ltv),
+    round(latest$ltv_cac_ratio, 2)
+  ),
+  Interpretation = c(
+    "Current book of business",
+    "Gross new logos this month",
+    "Accounts lost this month",
+    "Sales and marketing spend per new customer",
+    "Average revenue per user per month",
+    "Percent of customers lost per month",
+    "ARPU divided by churn rate times 70% margin",
+    "Target is 3x or above for a healthy business"
+  )
+)
+
+unit_econ_display %>%
+  kable(align = c("l", "r", "l")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+
+```
+CAC has actually been declining over the period which is an encouraging sign. The business is getting more efficient at acquiring customers, likely through improving sales processes or better marketing targeting. The question I would ask is whether this is intentional or whether we are just picking lower hanging fruit and deferring the harder prospects for later.
+```{r cac-chart}
+
+unit_econ %>% 
+  ggplot(aes(x = month, y = cac)) +
+  geom_line(color = "#E74C3C", linewidth = 1.2) +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.15,
+              color = "#E74C3C", fill = "#E74C3C") +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_x_date(date_labels = "%b '%y", date_breaks = "6 months") +
+  labs(
+    title = "Customer Acquisition Cost - 24 Month Trend",
+    subtitle = "Declining CAC suggests improving sales efficiency over 24 months",
+    x = NULL,
+    y= "CAC ($)"
+  ) +
+  theme_ba()
+
+```
+
+CAC declining is good news. But CAC alone does not tell the full story. What matters is whether the value of a customer over their lifetime justifies what we spent to acquire them. That is the LTV:CAC ratio and it is the single most important unit economics metric for understanding the health of the growth engine.
+
+```{r ltv-cac-chart}
+unit_econ %>% 
+  ggplot(aes(x=month, y = ltv_cac_ratio)) +
+  geom_line(color = "#2E86AB", linewidth =1.2) +
+  geom_point(color = "#2E86AB", size = 2.5) +
+  geom_hline(yintercept = 3, linetype = 'dashed',
+             color = "#27ae60", linewidth = 1) +
+  annotate("text",
+           x = min(unit_econ$month) + 30,
+           y = 3.15,
+           label = "Healthy threshold (3.0x)",
+           color = "#27ae60", size = 3.5) +
+  scale_x_date(date_labels = "%b '%y", date_breaks = "6 months") +
+  scale_y_continuous(limits = c(2, NA)) +
+    labs(
+    title    = "LTV:CAC Ratio — 24 Month Trend",
+    subtitle = "Below 3x means we are paying too much to acquire relative to customer value",
+    x = NULL,
+    y = "LTV:CAC"
+  ) +
+  theme_ba()
+```
+
+The ratio has been volatile across the period and is currently sitting at 2.56, below the 3x threshold. That is not a comfortable place to be. ARPU is declining as we bring on smaller accounts and CAC is only declining modestly. The gap is closing in the wrong direction. This is the conversation I am walking into on day two.
+
+The last unit economics view is churn. Every percentage point of monthly churn compounds. At 2% monthly you lose roughly 22% of your customer base annually. At 3% that number climbs to 31%. The question is not just where churn is today but where it has been and what direction it is moving.
+
+```{r churn-chart}
+unit_econ %>%
+  ggplot(aes(x = month, y = churn_rate)) +
+  geom_line(color = "#A23B72", linewidth = 1.2) +
+  geom_point(color = "#A23B72", size = 2.5) +
+  geom_hline(yintercept = 0.02, linetype = "dashed",
+             color = "grey50", linewidth = 0.8) +
+  annotate("text",
+           x     = min(unit_econ$month) + 30,
+           y     = 0.0215,
+           label = "2% monthly benchmark",
+           color = "grey50", size = 3.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  scale_x_date(date_labels = "%b '%y", date_breaks = "6 months") +
+  labs(
+    title    = "Monthly Customer Churn Rate — 24 Month Trend",
+    subtitle = "Even small churn compounds significantly at scale",
+    x = NULL,
+    y = "Monthly Churn Rate"
+  ) +
+  theme_ba()
+```
+Churn started well above 5% in early 2023 which is a serious problem for any business. The encouraging news is the trend is consistently downward and by late 2024 we are approaching the 2% monthly benchmark. That kind of improvement does not happen by accident. Something changed, whether that was a CS process improvement, a product fix, or a change in the customer mix. I would want to know exactly what drove it because whatever it was we should be doing more of it.
+
+# Executive Summary
+
+I have now looked at this business through four lenses. Here is what I would
+walk into my manager's office to say at the end of day one. Not conclusions,
+not recommendations — those come after I have had more conversations. But
+these are the patterns I see, the questions they raise, and the things I want
+to understand better before I start building anything.
+
+```{r exec-summary}
+tibble(
+  Category = c(
+    "Revenue Growth (YoY)",
+    "Gross Margin (Latest)",
+    "EBITDA Margin (Latest)",
+    "Marketing Budget Variance (YTD)",
+    "Engineering Budget Variance (YTD)",
+    "Customer Success Attrition",
+    "LTV:CAC Ratio (Latest)",
+    "Monthly Churn Rate (Latest)"
+  ),
+  Value = c(
+    percent(
+      (monthly_pl %>% filter(year == 2024) %>% pull(revenue) %>% mean()) /
+      (monthly_pl %>% filter(year == 2023) %>% pull(revenue) %>% mean()) - 1,
+      accuracy = 0.1),
+    percent(last(monthly_pl$gross_margin), accuracy = 0.1),
+    percent(last(monthly_pl$ebitda_margin), accuracy = 0.1),
+    percent(filter(bva_summary, department == "Marketing") %>% 
+              pull(variance_pct), accuracy = 0.1),
+    percent(filter(bva_summary, department == "Engineering") %>% 
+              pull(variance_pct), accuracy = 0.1),
+    percent(filter(headcount, department == "Customer Success") %>% 
+              pull(attrition_rate), accuracy = 1),
+    as.character(round(last(unit_econ$ltv_cac_ratio), 2)),
+    percent(last(unit_econ$churn_rate), accuracy = 0.1)
+  ),
+Signal = c(
+  "Strong",
+  "Healthy", 
+  "Watch",
+  "Investigate",
+  "Deferred hiring",
+  "Investigate",
+  "Below threshold",
+  "Improving"
+)
+) %>%
+  kable(align = c("l", "r", "c"), escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+**What looks healthy:**
+
+Revenue is growing and gross margin is improving. The core business model is
+working. Churn has dropped significantly over two years which is the most
+encouraging trend in the whole analysis.
+
+**What I am watching:**
+
+EBITDA margin is thin and has been negative in several months. The business
+is not yet consistently profitable at the operating level. Engineering is
+running under budget but has 5 open roles. That underspend is not savings,
+it is deferred cost that will show up the moment those roles get filled.
+
+**What I am flagging for week one conversations:**
+
+Marketing is 13.2% over budget with no sign of the gap closing. I want to
+understand whether that spend is approved and whether it is producing results
+in the acquisition numbers. Customer Success has a 25% attrition rate and is
+running under budget simultaneously. That combination concerns me more than
+any other single data point in this analysis. High CS attrition means
+relationship continuity breaks down, which means churn risk goes up, which
+means the LTV:CAC ratio that is already below 3x gets worse. These things
+are connected and I want to map that connection before I build anything else.
