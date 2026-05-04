@@ -45,6 +45,9 @@ library(patchwork)
 
 # Setting the Scene
 
+*Data source: Maven Analytics — CRM Sales Opportunities dataset.
+Available at [mavenanalytics.io/data-playground](https://mavenanalytics.io/data-playground).*
+
 For this analysis I am stepping into the role of a data analyst who has just been handed access to the company CRM. CRM stands for Customer Relationship Management - it is the system sales teams use to track every deal they are working, from the first conversation with a prospect all the way through to a closed contract or a lost opportunity.
 
 The company sells computer hardware across three product lines - GTX, MG, and GTK - at price points ranging from $55 to nearly $27,000 per unit. The sales team is organized into regional offices, each managed by a sales manager who oversees a group of individual agents. Every deal an agent works gets logged in the pipeline with a stage, a product, an account, and eventually an outcome.

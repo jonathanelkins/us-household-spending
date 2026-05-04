@@ -1,0 +1,1145 @@
+---
+title: "Who's About to Leave - Building a Telecom Churn Prediction System"
+author: "Jonathan Elkins"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 10,
+  fig.height = 6,
+  fig.align  = "center"
+)
+
+set.seed(42)
+```
+
+```{r libraries}
+
+library(tidyverse)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(patchwork)
+library(tidymodels)
+library(vip)
+library(DALEXtra)
+library(ranger)
+library(xgboost)
+library(glmnet)
+
+```
+
+# Setting the Scene
+
+*Data source: Maven Analytics — Telecom Customer Churn dataset.
+Available at [mavenanalytics.io/data-playground](https://mavenanalytics.io/data-playground).*
+
+Every month, this telecom company loses roughly one in four customers. They leave for competitors, they leave over price, they leave because something broke and nobody fixed it fast enough. By the time a customer cancels, it is too late - the revenue is gone and the cost to acquire a replacement is four to five times what retention would have cost.
+
+The business problem is not that churn happens. Churn always happens. The problem is that right now, nobody knows *who* is about to churn until they already have. The retention team is either reacting after the fact or spraying discounts at the entire customer base hoping something sticks. Both are expensive. Neither is targeted.
+
+I am going to build a system that solves that problem.
+
+Using 6,589 customer with known outcomes - stayed or churned - I will train a machine learning model that assigns every active customer a churn probability score. The output is not a dashboard or a chart. It is a ranked list: here are your 200 highest-risk customers, here is how confident the model is about each one, and here is what it will cost the business if you do nothing.
+
+The retention team gets a call list. Finance gets a revenue-at-risk number. Leadership gets a decision, not a recommendation.
+
+Three things I want to know by the end:
+
+1. Which customers are most likely to churn in the next billing cycle?
+2. What is driving their risk - contract type, service issues, pricing?
+3. What is the financial cost of inaction versus targeted intervention?
+
+```{r load-data}
+churn_raw <- read_csv("data/churn_data/telecom_customer_churn.csv")
+zipcode_pop <- read_csv("data/churn_data/telecom_zipcode_population.csv")
+```
+
+```{r clean-data}
+churn_clean <- churn_raw %>% 
+  janitor::clean_names() %>% 
+  left_join(
+    zipcode_pop %>% janitor::clean_names(),
+    by = "zip_code"
+  ) %>% 
+  filter(customer_status != "Joined") %>% 
+  mutate(
+    churned = factor(
+      if_else(customer_status == "Churned", "Yes", "No"),
+      levels = c("Yes", "No")
+    )
+  ) %>% 
+  mutate(
+    avg_monthly_long_distance_charges = replace_na(
+      avg_monthly_long_distance_charges, 0
+    ),
+    avg_monthly_gb_download = replace_na(
+      avg_monthly_gb_download, 0
+    )
+  ) %>% 
+  mutate(
+    monthly_charge_flag = if_else(monthly_charge < 0, "Flagged", "Normal")
+  ) %>% 
+  select(
+    -customer_id,
+    -churn_category,
+    -churn_reason,
+    -customer_status,
+    -city,
+    -zip_code,
+    -latitude,
+    -longitude,
+    -monthly_charge_flag
+  )
+```
+
+```{r cleaning-summary}
+tribble(
+  ~Decision,                        ~Rationale,
+  "Removed 'Joined' customers",     "454 new customers have no churn outcome — including them contaminates the training data",
+  "Replaced NA in long distance",   "NA only appears when Phone Service = No, so 0 is the correct value, not missing",
+  "Replaced NA in GB download",     "Same logic — NA when Internet Service = No means zero usage, not unknown",
+  "Flagged negative monthly charge","One customer shows -$4.00 — kept in dataset but flagged as a data quality note",
+  "Dropped Churn Category/Reason",  "Post-churn fields — the model would never have access to these at prediction time (leakage)",
+  "Dropped Customer ID",            "Identifier with no predictive signal",
+  "Dropped lat/long/city/zip",      "Replaced by population from zip code join — more signal, less dimensionality"
+) %>%
+  kable(col.names = c("Cleaning Decision", "Rationale")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = TRUE
+  )
+```
+```{r dataset-confirmation}
+cat(
+  "Modeling dataset:",
+  nrow(churn_clean), "customers |",
+  sum(churn_clean$churned == "Yes"), "churned |",
+  sum(churn_clean$churned == "No"), "stayed |",
+  paste0(round(mean(churn_clean$churned == "Yes") * 100, 1), "% churn rate")
+)
+```
+# Exploratory Analysis
+
+Before building any model I want to understand the data the way a business person would - not through correlation matrices and p-values, but through the questions a retention manager would actually ask. Who is leaving? When do they leave? What are they paying? What made them go?
+
+This section answers those questions. It also informs every feature engineering decision we make in the modeling section. A pattern you can see in the data is a pattern you can encode in a recipe.
+
+```{r churn-by-contract}
+contract_churn <- churn_clean %>% 
+  group_by(contract) %>% 
+  summarize(
+    total   = n(),
+    churned = sum(churned == "Yes"),
+    rate    = churned / total,
+    .groups = 'drop'
+  )
+
+contract_churn %>% 
+  ggplot(aes(x = reorder(contract, -rate), y = rate, fill = contract)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_text(
+    aes(label = paste0(round(rate*100,1), "%\n(", comma(churned), " of ", comma(total), ")")),
+    vjust = -0.4, fontface = "bold", size = 4
+  ) +
+  scale_y_continuous(
+    labels = percent_format(),
+    limits = c(0, 0.6)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Month-to-Month" = "#e74c3c",
+      "One Year"       = "#f39c12",
+      "Two Year"       = "#2ecc71"
+    ),
+    guide = "none"
+  ) +
+  labs(
+    title = "Month-to-Month Customers Churn at Nearly 20x the Rate of Two-Year Contracts",    
+    subtitle = "Contract type is likely the single strongest predictor in the model",
+    x = NULL,
+    y = "Churn Rate",
+    caption = "Base: 6,589 customers with known outcomes"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = 'grey40'),
+    panel.grid.major.x = element_blank()
+  )
+```
+The contract split is stark — and more extreme than expected. Month-to-month
+customers churn at nearly 20 times the rate of two-year contract holders.
+One in two month-to-month customers leaves. Fewer than one in forty
+two-year customers does the same.
+
+This is expected directionally — customers with no commitment have no
+friction to leaving — but the magnitude changes the business calculus
+entirely. Contract type is not just a predictor in this model, it is
+the clearest lever the retention team has. A customer converted from
+month-to-month to even a one-year contract cuts their churn probability
+by nearly 80%.
+
+The interesting question is what drives churn among the customers who
+*do* have contracts — and what other signals compound the risk for
+month-to-month customers who are already exposed.
+
+```{r churn-by-tenure}
+
+tenure_churn <- churn_clean %>% 
+  mutate(tenure_band = cut(
+    tenure_in_months,
+    breaks = c(0, 6, 12, 24, 26, 48, 72),
+    labels = c("0–6 mo", "7–12 mo", "13–24 mo", "25–36 mo", "37–48 mo", "49–72 mo")
+  )) %>% 
+  group_by(tenure_band) %>% 
+  summarize(
+    total   = n(),
+    churned = sum(churned == "Yes"),
+    rate    = churned / total,
+    .groups = 'drop'
+  )
+
+p_tenure <- tenure_churn %>% 
+  ggplot(aes(x = tenure_band, y = rate, fill = rate)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_text(
+    aes(label = paste0(round(rate*100, 1), "%")),
+    vjust = -0.4, fontface = "bold", size = 3.8
+  ) +
+  scale_y_continuous(
+    labels = percent_format(),
+  ) +
+  scale_fill_gradient(
+    low  = "#2ecc71",
+    high = "#e74c3c",
+    guide = "none"
+  ) +
+  labs(
+    title = "Churn is a New Customer Problem",
+    subtitle = "Risk drops sharply after the first year",
+    x        = "Tenure Band",
+    y        = "Churn Rate"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = 'grey40'),
+    panel.grid.major.x = element_blank()
+  )
+
+```
+
+```{r churn-by-internet}
+internet_churn <- churn_clean %>% 
+  mutate(
+    internet_type = replace_na(internet_type, "None")
+  ) %>% 
+  group_by(internet_type) %>% 
+  summarize(
+    total = n(),
+    churned = sum(churned == "Yes"),
+    rate    = churned / total,
+    .groups = 'drop'
+  )
+
+p_internet <- internet_churn %>% 
+  ggplot(aes(x = reorder(internet_type, -rate), y = rate, fill = internet_type)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_text(
+    aes(label = paste0(round(rate*100,1), "%\n(", comma(churned), " of ", comma(total), ")")),
+    vjust = -0.4, fontface = "bold", size = 3.8
+  ) +
+  scale_y_continuous(
+    labels = percent_format(),
+    limits = c(0, .6)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Fiber Optic" = "#e74c3c",
+      "Cable"       = "#f39c12",
+      "DSL"         = "#2ecc71"
+    ),
+    guide = "none"
+  ) +
+  labs(
+    title = "Fiber Optic Customers Churn\nat the Highest Rate",
+    subtitle = "Premium service, higher expectations - or a pricing problem",
+    x = NULL,
+    y = "Churn Rate"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = 'grey40'),
+    panel.grid.major.x = element_blank()
+  )
+
+
+```
+
+```{r tenure-internet-combined}
+
+p_tenure + p_internet +
+  plot_annotation(
+    caption = "Base: 6,589 customers with known outcomes"
+  )
+
+```
+Two more patterns worth carrying into the model.
+
+Tenure tells a clear story — churn is overwhelmingly a new customer
+problem. Customers in their first six months churn at nearly double
+the rate of those who have been around two or more years. If a customer
+survives the first year, the probability of losing them drops
+dramatically. Early lifecycle intervention is where retention spend
+has the highest return.
+
+The internet type finding is more operationally interesting. Fiber
+optic customers — the company's premium tier — churn at the highest
+rate. That is counterintuitive at first glance. These are customers
+paying the most, presumably getting the best service. But high price
+plus high expectation is a volatile combination. Any service disruption
+or billing surprise hits harder when you are paying a premium. This
+is either a pricing problem, a service quality problem, or both —
+and it is worth a separate conversation with the product team.
+
+## Why Did They Leave?
+
+The model will predict *who* is at risk. But understanding *why* customers leave shapes how the retention team responds. A customer at risk because of competitor pricing needs a different intervention than one frustrated with network reliability.
+
+This data is only available for churned customers - and only after they have already left. It cannot be used in prediction. But it is the most actionable intelligence in the dataset for the people who have to actually make the calls.
+
+```{r churn-category}
+churn_why <- churn_raw %>% 
+  janitor::clean_names() %>% 
+  filter(customer_status == "Churned") %>% 
+  select(customer_id, churn_category, churn_reason, monthly_charge, tenure_in_months)
+
+p_category <- churn_why %>% 
+  count(churn_category, sort = TRUE) %>% 
+  mutate(pct = n / sum(n)) %>% 
+  ggplot(aes(x = reorder(churn_category, n), y = pct, fill = churn_category)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_text(
+    aes(label = paste0(round(pct*100,1),"%")),
+    hjust = -0.2, fontface = "bold", size = 4
+  ) +
+  scale_x_discrete() +
+  scale_y_continuous(
+    labels = percent_format(),
+    limits = c(0, 0.55)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Competitor" = "#e74c3c",
+      "Dissatisfaction" = "#e67e22",
+      "Attitude"= "#9b59b6",
+      "Price" = "#f39c12",
+      "Other" = "#95a5a6"
+    ),
+    guide = "none"
+  ) +
+  coord_flip() +
+  labs(
+    title = "Nearly Half of All Churners Left for a Competitor",
+    subtitle = "Competitor pressure is the dominant churn driver",
+    x = NULL,
+    y = "Share of Churned Customers"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    panel.grid.major.y = element_blank()
+  )
+
+p_reasons <- churn_why %>% 
+  count(churn_reason, sort = TRUE) %>% 
+  slice_head(n=10) %>% 
+  mutate(pct = n / nrow(churn_why)) %>% 
+  ggplot(aes(x = reorder(churn_reason, n), y = pct)) +
+  geom_col(fill = "#2c3e50", alpha = 0.8, width = 0.6) +
+  geom_text(
+    aes(label = paste0(round(pct*100,1), "%")),
+    hjust = -0.2, fontface = "bold", size = 3.8
+  ) +
+  scale_y_continuous(
+    labels = percent_format(),
+    limits = c(0, 0.25)
+  ) + 
+  coord_flip() +
+  labs(
+    title = "Top 10 Churn Reasons",
+    subtitle = "Competitor devices and offers dominate the list",
+    x = NULL,
+    y = "Share of Churned Customers"
+  ) +
+  theme_minimal(base_size =  12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = 'grey40'),
+    panel.grid.major.y = element_blank()
+  )
+
+p_category / p_reasons +
+  plot_annotation(
+    caption = "Base: 1,869 churned customers"
+  )
+
+```
+
+The why-they-left data sharpens the business problem considerably.
+
+Competitor pressure is the dominant driver — nearly half of all churned
+customers left because a competitor offered something better: better
+devices, better pricing, better download speeds. This is not a service
+failure story. It is a competitive positioning story. Discounts and
+service credits will not fix it if the product itself is falling behind.
+
+The third largest category — Attitude — deserves specific attention.
+"Attitude of support person" is the single biggest non-competitor churn
+reason at 11.8%. That means more customers left because of how they were
+treated by staff than because of price, network reliability, or product
+dissatisfaction combined. This is entirely within the company's control,
+and it is not being controlled.
+
+Price ranks lower than expected as a standalone category. But price
+sensitivity likely compounds the other drivers — a customer already
+frustrated with service quality becomes a churner the moment they see
+a competitor's offer.
+
+This tells the retention team two things: build a better product to
+compete on features, and fix the service experience to hold the
+customers you already have.
+
+# Feature Engineering
+
+Raw data does not go into a model. A recipe does.
+
+The recipe defines every transformation applied to the data before
+a model sees it — encoding categorical variables, normalizing numeric
+ranges, handling structural patterns in the features. Doing this inside
+a `recipe` rather than manually mutating the dataframe means the exact
+same transformations are applied to training data, test data, and any
+new customer scored in the future. No leakage. No inconsistency.
+
+Every decision below is deliberate. I will note what each step does
+and why it is necessary for this specific dataset.
+
+```{r split}
+
+churn_split <- initial_split(churn_clean, prop = 0.75, strata = churned)
+churn_train <- training(churn_split)
+churn_test <- testing(churn_split)
+churn_folds <- vfold_cv(churn_train, v = 5, strata = churned)
+
+cat(
+  "Training Set:", nrow(churn_train), "customers |",
+  sum(churn_train$churned == "Yes"), "churned\n",
+  "Test Set:    ", nrow(churn_test), "customers |",
+  sum(churn_test$churned == "Yes"), "churned"
+)
+
+```
+```{r recipe}
+
+churn_recipe <- recipe(churned ~ ., data = churn_train) %>% 
+  step_mutate(
+    revenue_per_month = total_revenue / pmax(tenure_in_months, 1),
+    has_phone         = if_else(phone_service == "Yes", 1L, 0L),
+    is_month_to_month = if_else(contract == "Month-to-Month", 1L, 0L),
+    senior            = if_else(age >= 65, 1L, 0L)
+  ) %>% 
+  step_mutate(
+    across(
+      c(married, paperless_billing, unlimited_data,
+        online_security, online_backup, device_protection_plan,
+        premium_tech_support, streaming_tv, streaming_movies,
+        streaming_music, multiple_lines),
+      ~ if_else(. == "Yes", 1L, 0L, missing = 0L)
+    )
+  ) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_unknown(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>% 
+  step_zv(all_predictors()) %>% 
+  step_rm(phone_service_Yes, internet_service_Yes) %>%
+  step_impute_median(all_numeric_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+
+```
+
+Three engineered features are worth highlighting.
+
+`revenue_per_month` captures something raw tenure and charges cannot —
+the rate at which a customer generates value. A customer who has been
+around 60 months and spent $6,000 total looks identical to one who
+spent $6,000 in 30 months on raw total revenue. The per-month rate
+tells a very different story about who is worth fighting to keep.
+
+`is_month_to_month` flags the single strongest predictor we identified
+in EDA as an explicit binary signal, making it easier for tree models
+to split on cleanly rather than encoding it across dummy variable columns.
+
+`senior` captures the age threshold at 65 — not because age is
+inherently predictive, but because senior customers often have different
+service needs and different price sensitivity thresholds that compound
+other risk signals.
+
+The `step_novel` call handles any category levels in the test set that
+did not appear in training — a small but important safeguard that
+prevents the pipeline from breaking on unseen data.
+
+# Model Building
+
+The recipe is fixed. Now we define three models, pair each one with the
+recipe inside a workflow, and train them all against the same five
+cross-validation folds. Every model sees identical data preparation —
+the only thing that varies is the algorithm.
+
+I am fitting three models deliberately chosen to represent different
+approaches to the same problem:
+
+- **Regularized Logistic Regression** — the interpretable baseline.
+  Fast, explainable, and an honest benchmark. If a complex model cannot
+  beat it meaningfully, the complexity is not worth it.
+- **Random Forest** — an ensemble of decision trees. Handles non-linear
+  relationships and interactions between features without any manual
+  specification.
+- **XGBoost** — gradient boosted trees. Generally the strongest
+  performer on structured tabular data. Requires more tuning but
+  rewards it.
+  
+```{r model-specs}
+
+log_spec <- logistic_reg(penalty = tune(), mixture = 0) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification")
+
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) %>% 
+  set_engine("ranger", importance = "impurity") %>% 
+  set_mode("classification")
+
+xgb_spec <- boost_tree(
+  trees      = 500,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune(),
+  min_n          = tune()
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+```
+
+```{r workflows}
+
+log_wf <- workflow() %>% 
+  add_recipe(churn_recipe) %>% 
+  add_model(log_spec)
+
+rf_wf <- workflow() %>% 
+  add_recipe(churn_recipe) %>% 
+  add_model(rf_spec)
+
+xgb_wf <- workflow() %>% 
+  add_recipe(churn_recipe) %>% 
+  add_model(xgb_spec)
+
+```
+
+```{r tune-models, cache=TRUE}
+churn_metrics <- metric_set(roc_auc, accuracy, sensitivity, specificity)
+
+log_grid <- grid_regular(penalty(), levels = 20)
+
+rf_grid <- grid_random(
+  mtry(range = c(5, 20)),
+  min_n(range = c(2, 20)),
+  size = 15
+)
+
+xgb_grid <- grid_random(
+  tree_depth(range       = c(3, 8)),
+  learn_rate(range       = c(-3, -1)),
+  loss_reduction(range   = c(-5, 0)),
+  min_n(range            = c(2, 20)),
+  size = 20
+)
+
+log_res <- tune_grid(
+  log_wf,
+  resamples = churn_folds,
+  grid = log_grid,
+  metrics = churn_metrics
+)
+
+rf_res <- tune_grid(
+  rf_wf,
+  resamples = churn_folds,
+  grid      = rf_grid,
+  metrics   = churn_metrics
+)
+
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = churn_folds,
+  grid = xgb_grid,
+  metrics = churn_metrics
+)
+
+
+```
+
+```{r best-params}
+
+log_best <- log_res %>% select_best(metric = "roc_auc")
+rf_best  <- rf_res %>% select_best(metric = "roc_auc")
+xgb_best <- xgb_res %>% select_best(metric = "roc_auc")
+
+log_final <- log_wf %>% finalize_workflow(log_best)
+rf_final  <- rf_wf  %>% finalize_workflow(rf_best)
+xgb_final <- xgb_wf %>% finalize_workflow(xgb_best)
+
+log_fit <- log_final %>% last_fit(churn_split, metrics = churn_metrics)
+rf_fit  <- rf_final %>% last_fit(churn_split, metrics = churn_metrics)
+xgb_fit <- xgb_final %>% last_fit(churn_split, metrics = churn_metrics)
+
+```
+
+```{r model-comparison}
+collect_model_metrics <- function(fit, model_name) {
+  fit %>% 
+    collect_metrics() %>% 
+    mutate(model = model_name) %>% 
+    select(model, .metric, .estimate)
+}
+
+comparison <- bind_rows(
+  collect_model_metrics(log_fit, "Logistic Regression"),
+  collect_model_metrics(rf_fit,  "Random Forest"),
+  collect_model_metrics(xgb_fit, "XGBoost")
+) %>% 
+  pivot_wider(names_from = .metric, values_from = .estimate) %>% 
+  arrange(desc(roc_auc)) %>% 
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+comparison %>%
+  select(model, roc_auc, accuracy, sensitivity, specificity) %>%
+  kable(
+    col.names = c("Model", "ROC AUC", "Accuracy", "Sensitivity", "Specificity"),
+    align     = c("l", "c", "c", "c", "c")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = TRUE
+  ) %>%
+  row_spec(1, bold = TRUE, background = "#eafaf1")
+```
+```{r roc-curves}
+
+collect_preds <- function(fit, model_name) {
+  fit %>% 
+    collect_predictions() %>% 
+    mutate(model = model_name)
+}
+
+all_preds <- bind_rows(
+  collect_preds(log_fit, "Logistic Regression"),
+  collect_preds(rf_fit,  "Random Forest"),
+  collect_preds(xgb_fit, "XGBoost")
+)
+
+all_preds %>% 
+  group_by(model) %>% 
+  roc_curve(truth = churned, .pred_Yes) %>% 
+  ggplot(aes(x=1-specificity,y=sensitivity,color=model)) +
+  geom_line(linewidth = 1.2, alpha = 0.85) +
+  geom_abline(linetype = "dashed", color = "grey60") +
+  scale_color_manual(
+    values = c(
+      "Logistic Regression" = "#3498db",
+      "Random Forest"       = "#2ecc71",
+      "XGBoost"             = "#e74c3c"
+    )
+  ) +
+  labs(
+    title = "ROC Curves - Model Comparison on Held-Out Test Set",
+    subtitle = "Higher and further left is better - the dashed line is random chance",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    color = NULL,
+    caption = "Base: 1,648 test set customers"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    legend.position = "bottom"
+  )
+
+```
+All three models perform well — ROC AUC above 0.91 across the board
+means even the simplest model is genuinely useful. But XGBoost wins
+on every metric and becomes the production model.
+
+A few numbers worth dwelling on.
+
+XGBoost achieves 0.938 ROC AUC on customers it has never seen. That
+means the model correctly distinguishes churners from stayers 94% of
+the time — on held-out test data, with no information about outcomes.
+For a retention use case, that is a deployable number.
+
+Specificity at 0.939 means the model correctly identifies 94% of
+customers who will stay. That matters for operational efficiency —
+the retention team is not wasting calls on customers who were never
+going to leave.
+
+Sensitivity at 0.756 is the number to watch. The model correctly
+flags 76% of actual churners. That means roughly 1 in 4 churners
+slips through undetected. That is not a failure — no model catches
+everyone — but it sets a realistic expectation for the business:
+a targeted retention campaign using this model will reach the majority
+of at-risk customers, not all of them.
+
+The logistic regression baseline at 0.915 AUC is a reminder that
+the data has strong signal regardless of algorithm. The features
+we engineered — contract type, tenure, revenue per month — do most
+of the heavy lifting. XGBoost finds the non-linear interactions
+that logistic regression cannot, and that gap is real and consistent.
+It earns its complexity.
+
+## What is Driving the Model?
+
+A model that cannot be explained cannot be trusted, and cannot be acted on. Accuracy metrics tell us the model works. Feature importance tells us *why* it works, and gives the retention team something concrete to act on.
+
+```{r feature-importance}
+xgb_fitted <- xgb_final %>% 
+  fit(data = churn_train) %>% 
+  extract_fit_parsnip()
+
+xgb_fitted %>% 
+  vip(
+    num_features = 20,
+    aesthetics   = list(fill = "#2c3e50")
+  ) +
+  labs(
+    title   = "XGBoost Feature Importance - Top 20 Predictors",
+    subtitle = "Importance measured by total gain across all splits",
+    x = "Importance (Gain)",
+    y = NULL,
+    caption = "Base: 4,941 training customers"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+The feature importance plot confirms and sharpens everything we saw
+in EDA — but with a few surprises worth calling out.
+
+`is_month_to_month` is the dominant predictor by a wide margin. Its
+importance score is nearly 60% higher than the second place feature.
+This is the engineered binary flag we created from contract type —
+and the fact that it outperforms the raw contract dummies validates
+the engineering decision. The model found more signal in a clean
+binary split than in the multi-level encoding.
+
+`tenure_in_months` ranks second, confirming that how long a customer
+has been with the company is nearly as predictive as their contract
+type. New customers on month-to-month contracts are the highest-risk
+segment by a significant margin — these two features together define
+the core risk profile.
+
+`number_of_referrals` ranking third is the most strategically
+interesting finding in the entire model. Customers who refer others
+are customers who are engaged, satisfied, and embedded in the product.
+Zero referrals is a quiet signal of disengagement that compounds
+every other risk factor. This is a metric the retention team can
+act on before a customer ever shows explicit signs of leaving —
+a customer who has never referred anyone and is month-to-month
+and in their first year is a three-signal risk flag.
+
+`monthly_charge` and `age` in the top six make intuitive sense.
+Higher charges increase price sensitivity. Older customers may have
+different service expectations or less tolerance for friction.
+
+Below the top six, importance scores drop sharply and converge.
+`contract_Two.Year`, `avg_monthly_gb_download`, `population`, and
+`payment_method_Credit.Card` all contribute meaningful but secondary
+signal. The long tail of streaming services, billing preferences,
+and add-ons matter at the margin but are not decision drivers.
+
+The model is telling the retention team something actionable:
+find the month-to-month customers in their first year who have
+never referred anyone and are paying above-average monthly charges.
+That is your intervention list.
+
+# The Business Output
+
+The model is built. The question now is what to do with it.
+
+A churn probability score sitting in a research document helps nobody.
+What the business needs is a ranked list of customers to act on, a
+revenue number that justifies the intervention budget, and a clear
+threshold that tells the retention team when to make the call.
+
+This section delivers all three.
+
+```{r score-customers}
+
+churn_scores <- xgb_fit %>% 
+  collect_predictions() %>% 
+  select(
+    .row,
+    churned,
+    churn_prob = .pred_Yes
+  ) %>% 
+  arrange(desc(churn_prob)) %>% 
+  mutate(
+    risk_tier = case_when(
+      churn_prob >= .80 ~ "Critical",
+      churn_prob >= .60 ~ "High",
+      churn_prob >= .40 ~ "Medium",
+      TRUE              ~ "Low"
+    ),
+    risk_tier = factor(risk_tier, levels = c("Critical", "High", "Medium", "Low"))
+  )
+
+test_customers <- churn_test %>% 
+  mutate(.row = row_number()) %>% 
+  select(.row, monthly_charge, tenure_in_months, contract)
+ 
+churn_scores <- churn_scores %>% 
+  left_join(test_customers, by = ".row")
+```
+
+```{r risk-tier-summary}
+churn_scores %>% 
+  group_by(risk_tier) %>% 
+  summarize(
+    customers = n(),
+    actual_churners = sum(churned == "Yes"),
+    detection_rate  = actual_churners / customers,
+    avg_monthly_rev = mean(monthly_charge, na.rm = T),
+    total_monthly_rev_at_risk = sum(
+      if_else(churned == "Yes", monthly_charge, 0), na.rm = T
+    ),
+    .groups = "drop"
+  ) %>% 
+  mutate(
+    annual_rev_at_risk = total_monthly_rev_at_risk * 12,
+    across(where(is.numeric), ~ round(., 2)),
+    detection_rate = percent(detection_rate, accuracy = 0.1),
+    avg_monthly_rev = dollar(avg_monthly_rev),
+    annual_rev_at_risk = dollar(annual_rev_at_risk)
+  ) %>% 
+  kable(
+    col.names = c(
+      "Risk Tier", "Customers", "Actual Churners",
+      "Detection Rate", "Avg Monthly Charge",
+      "Monthly Rev at Risk", "Annual Rev at Risk"
+    ),
+    align = c("l", "c", "c", "c", "c", "c", "c")
+  ) %>% 
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width        = TRUE
+  ) %>% 
+  row_spec(1, bold = TRUE, background = "#fdf2f2") %>% 
+  row_spec(2, background = "#fef9f0")
+```
+```{r revenue-at-risk}
+churn_scores %>% 
+  filter(churned == "Yes") %>% 
+  mutate(
+    annual_value = monthly_charge * 12
+  ) %>% 
+  ggplot(aes(x = churn_prob, y = annual_value, color = risk_tier)) +
+  geom_point(alpha = 0.5, size = 1.8) +
+  scale_color_manual(
+    values = c(
+      "Critical" = "#e74c3c",
+      "High"     = "#e67e22",
+      "Medium"   = "#f39c12",
+      "Low"      = "#2ecc71"
+    )
+  ) +
+  scale_x_continuous(labels = percent_format()) +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title = "Revenue at Risk - Actual Churners by Probability Score and Annual Value",
+    subtitle = "Each point is a customer who churned - color indicates model risk tier",
+    x = "Predicted Churn Probability",
+    y = "Annual Revenue Value",
+    color = "Risk Tier",
+    caption = "Base: actual churners in held-out test set"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    legend.position = "right"
+  )
+
+```
+```{r intervention-threshold}
+
+threshold <- 0.6
+
+intervention_list <- churn_scores %>% 
+  filter(churn_prob >= threshold) %>% 
+  arrange(desc(churn_prob))
+
+total_at_risk <- nrow(intervention_list)
+churners_caught <- sum(intervention_list$churned == "Yes")
+monthly_rev_saved <- sum(
+  if_else(intervention_list$churned == "Yes", intervention_list$monthly_charge, 0),
+  na.rm = T
+)
+annual_rev_saved <- monthly_rev_saved * 12
+precision        <- churners_caught / total_at_risk
+
+cat(
+    "── Intervention List at 60% Threshold ──────────────────\n",
+  "Customers flagged:       ", total_at_risk, "\n",
+  "Actual churners on list: ", churners_caught, "\n",
+  "List precision:          ", percent(precision, accuracy = 0.1), "\n",
+  "Annual revenue at risk:  ", dollar(annual_rev_saved), "\n",
+  "────────────────────────────────────────────────────────\n"
+)
+```
+## The Intervention List
+
+At a 60% probability threshold, the model flags 353 customers for
+retention intervention. Of those 353, 312 are actual churners —
+a list precision of 88.4%. The retention team is not spraying calls
+at the entire customer base. They are working a list where nearly
+9 in 10 contacts are genuinely at risk.
+
+The annual revenue protected by acting on that list: **$49,052**.
+That is the revenue currently walking out the door from this test
+set alone. Scaled to the full customer base, the number is
+proportionally larger.
+
+The risk tier breakdown sharpens the operational picture further.
+
+The **Critical tier** — 244 customers with 80%+ churn probability
+— has a 96% detection rate. These are not maybes. The model is
+almost certain they are leaving. At an average monthly charge of
+$59.39, each Critical customer retained is worth $712 annually.
+With 234 actual churners in this tier, the revenue at stake is
+$37,457 per year from this group alone.
+
+The **High tier** catches 78 more churners at 72% precision —
+still a strong signal, and worth working after the Critical list
+is exhausted.
+
+The **Low tier** tells the other side of the story. 1,156 customers
+scored below 40% probability. Only 85 of them actually churned —
+a 7% rate. Sending the retention team into this segment would mean
+making over 1,000 calls to reach 85 churners. The model says:
+do not bother.
+
+## What This Means for the Business
+
+Three concrete recommendations come out of this analysis:
+
+**1. Build the intervention list today.** Score every active
+month-to-month customer using this model. Prioritize the Critical
+tier for immediate outreach — contract conversion offers, service
+credits, or account reviews. The list is already ranked by
+confidence. Work it from the top.
+
+**2. Fix the first year.** The model and the EDA agree — new
+customers churn at catastrophically high rates. A structured
+90-day onboarding program with proactive check-ins would address
+the highest-risk window before the model even needs to flag anyone.
+
+**3. Track referrals as a leading indicator.** Number of referrals
+is the third most important feature in the model and the earliest
+signal available. A customer who has never referred anyone after
+six months on a month-to-month contract is a retention priority
+before they ever show billing or service complaints. Build that
+flag into the CRM.
+
+The model does not replace judgment. It focuses it.
+
+# Model Card
+
+---
+
+## Model Overview
+
+```{r model-overview-table}
+tribble(
+  ~Field,        ~Value,
+  "Model Name",  "Telecom Customer Churn Prediction",
+  "Model Type",  "XGBoost Binary Classifier",
+  "Version",     "1.0",
+  "Date",        as.character(Sys.Date()),
+  "Author",      "Jonathan Elkins"
+) %>%
+  kable(col.names = NULL) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+---
+
+## The Problem This Model Solves
+
+This model predicts which telecom customers are likely to churn
+before they cancel. It assigns every active customer a probability
+score between 0 and 1. Customers above 0.60 are flagged for
+retention intervention. The output is a ranked call list, not a
+report.
+
+---
+
+## Training Data
+
+```{r training-data-table}
+tribble(
+  ~Field,            ~Value,
+  "Source",          "Maven Analytics — Telecom Customer Churn Dataset",
+  "Population",      "6,589 customers with known outcomes",
+  "Excluded",        "454 newly joined customers",
+  "Training split",  "75% training (4,941) / 25% test (1,648)",
+  "Churn rate",      "28.4% in modeling population",
+  "Geography",       "California-based telecom customers"
+) %>%
+  kable(col.names = NULL) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+---
+
+## Features Used
+
+```{r features-table}
+tribble(
+  ~Category,            ~Features,
+  "Contract & Tenure",  "Contract type, tenure in months, is_month_to_month (engineered)",
+  "Demographics",       "Age, gender, married, number of dependents, senior (engineered)",
+  "Financials",         "Monthly charge, total charges, total revenue, revenue_per_month (engineered)",
+  "Services",           "Internet type, online security, streaming services, tech support",
+  "Engagement",         "Number of referrals, offer type, payment method",
+  "Geography",          "Zip code population"
+) %>%
+  kable(col.names = c("Category", "Features")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = TRUE)
+```
+
+**Excluded from model (data leakage):** Churn Category, Churn Reason,
+Customer Status — these fields are only available after a customer
+has already churned and would not exist at prediction time.
+
+---
+
+## Performance
+
+Evaluated on 1,648 held-out test customers never seen during training.
+
+```{r model-performance-table}
+tribble(
+  ~Metric,        ~Score,
+  "ROC AUC",      "0.938",
+  "Accuracy",     "0.887",
+  "Sensitivity",  "0.756",
+  "Specificity",  "0.939"
+) %>%
+  kable(col.names = c("Metric", "Score")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+At the recommended 0.60 intervention threshold:
+
+```{r threshold-table}
+tribble(
+  ~Metric,                         ~Value,
+  "Customers flagged",             "353",
+  "Actual churners on list",       "312",
+  "List precision",                "88.4%",
+  "Annual revenue at risk",        "$49,052"
+) %>%
+  kable(col.names = c("Metric", "Value")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+---
+
+## Intended Use
+
+**Appropriate uses:**
+- Ranking active customers by churn risk for retention outreach
+- Prioritizing retention team call lists
+- Estimating revenue at risk from at-risk customer segments
+- Identifying early warning signals for account management
+
+**Inappropriate uses:**
+- Predicting churn for customers outside the California telecom
+  context without retraining
+- Automated customer termination or service restriction decisions
+- Any use where a false positive causes material harm to the customer
+
+---
+
+## Known Limitations
+
+**Sensitivity at 75.6%** means roughly 1 in 4 churners will not
+be flagged at the 0.60 threshold. These customers will churn
+without intervention. Lowering the threshold captures more churners
+but reduces list precision.
+
+**Geography** — this model was trained entirely on California
+customers. Performance on customers in other states or countries
+is unknown and should not be assumed.
+
+**Static snapshot** — the model reflects customer behavior at a
+single point in time. Customer behavior and competitive dynamics
+change. The model should be retrained quarterly on fresh data to
+maintain performance.
+
+**No causal inference** — feature importance shows correlation,
+not causation. The model identifies who is at risk. It does not
+guarantee that any specific intervention will change the outcome.
+
+---
+
+## Threshold Guidance
+
+The recommended threshold is **0.60**, which balances list precision
+(88.4%) against coverage (capturing 66% of all churners in the
+test set). Teams with larger retention capacity may lower the
+threshold to 0.40 to capture more churners at the cost of lower
+precision. Teams with limited capacity should raise it to 0.80
+to work only the highest-confidence cases.
+
+---
+
+## Retraining Triggers
+
+Retrain the model if any of the following occur:
+
+- ROC AUC on a fresh validation sample drops below 0.90
+- The overall churn rate shifts by more than 5 percentage points
+- A major product, pricing, or market change occurs
+- More than 6 months have passed since last training
