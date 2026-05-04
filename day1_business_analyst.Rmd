@@ -46,25 +46,70 @@ library(patchwork)
 
 # Setting the Scene
 
-It is my first day. I have been handed a folder, or more likely a SharePoint link, with the words "here is what we have, get familiar."
+For this analysis I am stepping into the role of a newly hired business analyst
+at a mid-market SaaS company. The business sells software on a subscription
+basis, meaning customers pay a recurring monthly fee in exchange for access to
+the product. The company has been operating for a few years, has an established
+customer base, and is in a growth phase — adding new customers every month while
+managing the costs of building the product, selling it, and supporting the people
+who use it.
 
-My job right now is not to have answers, but it is to ask the right questions. Before I can flag a problem, recommend a cut, or build a model, I need to understand the shape of this business. That means working through four lenses:
+The company has five departments. Sales owns new customer acquisition. Marketing
+generates pipeline and manages the brand. Engineering builds and maintains the
+product. G&A covers finance, legal, HR, and the other functions that keep the
+business running. Customer Success manages relationships with existing customers
+and is responsible for keeping them from canceling their subscriptions.
 
-1. **Revenue & Margin** - Are we growing? Is that growth profitable?
-2. **Budget vs. Actual** - Where are we spending differently than planned?
-3. **Headcount & Labor** - Are we staffed efficiently?
-4. **Unit Economics** - What does it actually cost to serve a customer?
+This matters because every number we look at today connects back to one of those
+five departments and the decisions the people in them are making. Revenue does
+not just happen. It is the result of salespeople closing deals, marketers
+generating leads, engineers shipping features, and customer success teams keeping
+accounts healthy. The data tells us where those efforts are working and where
+they are not.
 
-I am going to walk through each one out loud, showing my code, my reasoning, and the questions each chart raises. By the end I want a short list of things to follow up on in my first week.
+The analysis covers 24 months of P&L data from January 2023 through December
+2024, 12 months of budget vs. actual data for 2024, a current headcount snapshot,
+and 24 months of customer acquisition and retention metrics. By the end I want
+a clear picture of the financial health of this business and a short list of
+things I need to understand better before I start building anything.
 
-> **Note on data:** The data here is synthetic but built to mirror realistic 
-> patterns. Seasonality, deparmental cost structures, headcount ratios, margin
-> profiles you would actually encounter. The code is fully reproducible and
-> the patterns are real even if the numbers are not.
+My job right now is not to have answers. It is to ask the right questions. That
+means working through four lenses:
+
+1. **Revenue & Margin** — Are we growing? Is that growth profitable?
+2. **Budget vs. Actual** — Where are we spending differently than planned?
+3. **Headcount & Labor** — Are we staffed efficiently?
+4. **Unit Economics** — What does it actually cost to serve a customer?
+
+I am going to walk through each one out loud, showing my code, my reasoning,
+and the questions each chart raises. By the end I want a short list of things
+to follow up on in my first week.
+
+> **Note on data:** The data here is synthetic but built to mirror realistic
+> patterns. Seasonality, departmental cost structures, headcount ratios, margin
+> profiles you would actually encounter. The code is fully reproducible and the
+> patterns are real even if the numbers are not.
 
 # Generating the Data
 
-Before I dig in I need to build the dataset. In a real job this is where I would be connecting to a data warehouse, pulling from NetSuite or QuickBooks exports, or working with a financial analyst to get clean CSVs. Here I will generate everything from scratch so you can see exactly the structure I am expecting to work with.
+Before I touch a single chart I need to build the dataset. In a real job this
+is where I would open a ticket with the data engineering team, query a warehouse
+like Snowflake or BigQuery, or ask a financial analyst to pull the latest close
+from NetSuite. The data would be messy, have gaps, and require cleaning before
+it was usable.
+
+Here I am generating everything synthetically in R. That means I am writing code
+that produces fake but realistic numbers — the kind of numbers a real business
+in this revenue range and growth stage might actually produce. Seasonality is
+built in. Noise is built in. The relationships between variables are economically
+logical. The goal is not to simulate a specific company but to create a dataset
+that behaves like one so the analysis that follows reflects real analytical
+thinking rather than textbook examples.
+
+Every dataset is printed after it is built so you can see exactly what structure
+I am working with before any analysis begins. If you handed me a real export
+from your finance system this is the first thing I would do — look at the shape
+of the data before I build anything on top of it.
 
 ```{r generate-data}
 
@@ -94,6 +139,12 @@ monthly_pl <- tibble(
 
 ```
 
+This is the core P&L table. Each row is one month. Revenue and COGS are the
+top two lines — the difference between them is gross profit. Below that are
+five operating expense categories that together make up total OpEx. The derived
+columns at the end — gross profit, gross margin, EBITDA, EBITDA margin — are
+calculated from those raw inputs. Nothing in the derived columns is assumed.
+Everything flows from the numbers above it.
 
 ```{r budget-data}
 
@@ -123,6 +174,12 @@ budget_vs_actual <- tibble(
   )
 ```
 
+This table covers 2024 only because budget vs. actual is always a current year
+conversation. Each row is one department in one month. Budget is what we planned
+to spend. Actual is what we spent. Variance is the dollar difference and variance
+percent is that gap as a proportion of budget. A positive variance means we
+spent more than planned. A negative variance means we spent less.
+
 ```{r headcount-data}
 headcount <- tibble(
   department = c("Sales", "Marketing", "Engineering", "G&A", "Customer Success"),
@@ -139,7 +196,14 @@ headcount <- tibble(
 
 ```
 
-```{r unit-econ data}
+Headcount is a snapshot not a time series. Five departments, eight columns. The
+two derived columns at the end — total labor cost and fully loaded — are
+calculated here. Fully loaded multiplies base salary cost by 1.25 to account
+for benefits, payroll taxes, and employer contributions. That multiplier is a
+standard finance rule of thumb. In a real job I would get the exact figure from
+HR or the finance team but 1.2 to 1.3 is the typical range.
+
+```{r unit-econ-data}
 
 unit_econ <- tibble(
  month             = months,
@@ -159,6 +223,16 @@ unit_econ <- tibble(
   )
 
 ```
+
+Unit economics tracks how the business acquires and retains customers over time.
+New customers and churned customers drive the running total of active accounts.
+CAC is how much we spend to win each new customer. ARPU is how much each
+customer generates per month on average. Churn rate is the percentage of
+customers we lose each month. LTV is the estimated lifetime value of a customer
+given their ARPU and how long they typically stay. The LTV to CAC ratio is the
+single number that tells you whether the growth engine is healthy or not. A
+ratio below 3x is a warning sign. Above 5x might mean you are underinvesting
+in growth.
 
 ```{r data-check}
 
@@ -188,7 +262,7 @@ theme_ba <- function() {
     )
 }
 
-pallete_dept <- c(
+palette_dept <- c(
   "Sales"            = "#2E86AB",
   "Marketing"        = "#A23B72",
   "Engineering"      = "#F18F01",
@@ -200,7 +274,10 @@ pallete_dept <- c(
 
 # Revenue & Margin Analysis
 
-The first thing I want to see is the revenue trend. Not just the number but the shape. Is growth accelerating or decelerating? Is it smooth or lumpy? Does it show seasonality I need to account for in budget models? A single number tells you where you are. A trend tells you where you are going.
+The first thing I want to see is the revenue trend. Not just the number but the
+shape. Is growth accelerating or decelerating? Is it smooth or lumpy? Does it
+show seasonality I need to account for in budget models? A single number tells
+you where you are. A trend tells you where you are going.
 
 ```{r revenue-trend} 
 
@@ -223,6 +300,22 @@ monthly_pl %>%
   theme_ba()
 
 ```
+
+Revenue is growing steadily across the full 24 month period and the linear trend
+line confirms the direction is consistently upward. The area fill makes the
+growth shape easy to read at a glance. What I notice immediately is the softness
+in Q4 of both years — revenue dips slightly in the fall before recovering. That
+is not a crisis but it is a pattern worth flagging. If the business is building
+budgets that assume linear growth they are likely overestimating Q4 and
+underestimating the recovery in Q1 and Q2. I would want to understand whether
+this is demand driven, a timing issue in how contracts are signed, or something
+in how revenue is recognized.
+
+Revenue growth is encouraging but growth that erodes margin is not growth worth
+celebrating. The top line going up means nothing if we are spending more to
+deliver the product than we are taking in. Gross margin tells me whether the
+core economics of the business are healthy — before we even consider what it
+costs to run the company.
 
 ```{r gross-margin}
 
@@ -252,7 +345,20 @@ monthly_pl %>%
 
 ```
 
-Gross margin tells me about the core business. EBITDA tells me about the whole operation. After we pay our people, run our marketing, and keep the lights on, what is actually left? This is where I find out if the growth we saw in revenue is translating to the bottom line.
+Gross margin has averaged 48.4% across the period and has been stabilizing
+above that average through 2024. The volatility in 2023 is worth noting —
+the spread between the best and worst months was nearly 4 percentage points.
+That kind of swing usually means COGS has a variable component that is not
+fully under control, whether that is hosting costs, third party services, or
+delivery costs that fluctuate with volume. By 2024 the band has tightened
+which suggests the business has gotten better at managing those costs. That
+is a good sign but I would want to understand what changed.
+
+Gross margin tells me about the core business. EBITDA tells me about the whole
+operation. After we pay our people, run our marketing, keep the lights on, and
+cover everything else it takes to operate — what is actually left? This is where
+I find out if the revenue growth we just saw is translating to the bottom line
+or getting absorbed by the cost of running the company.
 
 ```{r ebitda-margin}
 
@@ -276,9 +382,29 @@ monthly_pl %>%
 
 ```
 
+This is the most important chart in the section. The business was losing money
+at the operating level in its earliest months — EBITDA was negative in January
+and February of 2023. That is not unusual for a company investing heavily in
+headcount and infrastructure ahead of revenue growth. What matters is the
+direction. By mid 2023 the business had turned the corner and has been mostly
+EBITDA positive since, with a few exceptions that coincide with the revenue dips
+we saw in the first chart. The margins are thin — most positive months are in
+the 2 to 7 percent range — which means there is not a lot of cushion if revenue
+misses or costs spike unexpectedly. That is the watch item coming out of this
+section.
+
 # Budget vs. Actual Variance Analysis
 
-This is often where a new analyst can add immediate value. The budget was set months ago by people making assumptions about the future. Actuals are what actually happened. The gap between them is where the interesting questions live. My job here is not to assign blame but to find the patterns and ask why.
+This is often where a new analyst can add immediate value. The budget was set
+months ago by people making assumptions about the future. Actuals are what
+actually happened. The gap between them is where the interesting questions live.
+My job here is not to assign blame but to find the patterns and ask why.
+
+A budget variance table is one of the first things I would ask for on day one.
+It tells me immediately which departments are running hot, which are running
+cold, and whether the business is tracking to its financial plan. Before I look
+at a single chart I want to see the numbers in a table so I can orient myself
+to the scale of the gaps.
 
 ```{r bva-table}
 
@@ -315,7 +441,19 @@ bva_summary %>%
 
 ```
 
-Marketing is the biggest concern at 13.2% over budget. Sales is also over but the variance is smaller and more explainable given variable commission structures. Engineering running under is worth a closer look. They have 5 open requisitions sitting unfilled, which means that underspend is likely deferred hiring cost, not actual savings. Customer Success is slightly under which sounds fine until you cross-reference it against their 25% attrition rate. under budget and understaffed is not a good combination.
+Three departments overspent and two underspent. Marketing is the biggest concern
+at 13.2% over budget — that is not a rounding error, that is a pattern. Sales
+is also over but commission structures are variable by nature so some overage
+is expected when the team is performing. G&A at 2.5% over is noise. The more
+interesting story is on the underspend side. Engineering is 3.6% under budget
+and has 5 open requisitions sitting unfilled. That is not savings — that is
+deferred hiring cost that will hit the moment those roles get filled. Customer
+Success is 3.1% under which sounds fine until you remember their attrition rate.
+Under budget and understaffed is not a good combination in a department
+responsible for keeping customers.
+
+The bar chart below makes the relative size of these gaps easier to read at a
+glance.
 
 ```{r bva-chart}
 
@@ -343,7 +481,16 @@ bva_summary %>%
 
 ```
 
-A single YTD number can hide a lot. I want to see when the overspend happened and whether it is getting better or worse over time. A department that blew its budget in January but has been tightening ever since is a very different conversation than one that keeps drifting further over every month.
+The visual confirms what the table showed but makes the relative scale
+immediately clear. Marketing's overspend dwarfs everything else on a percentage
+basis. Engineering and Customer Success are the only departments running under
+and for reasons that deserve scrutiny rather than celebration.
+
+A single YTD number can hide a lot. A department that blew its budget in January
+but has been tightening every month since is a very different conversation than
+one that keeps drifting further over. I want to see the monthly shape of the
+variance for the three most interesting departments so I can understand whether
+these are improving problems or worsening ones.
 
 ```{r bva-monthly}
 budget_vs_actual %>% 
@@ -357,7 +504,7 @@ budget_vs_actual %>%
   facet_wrap(~department, ncol = 1, scales = "free_y") +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   scale_x_date(date_labels = "%b '%y") +
-  scale_color_manual(values = pallete_dept, guide = "none") +
+  scale_color_manual(values = palette_dept, guide = "none") +
   labs(
     title = "Monthly Variance % - Overspending Departments",
     subtitle = "Positive = spending above budget | Negative = under budget",
@@ -367,10 +514,27 @@ budget_vs_actual %>%
   theme_ba()
 ```
 
+Marketing is consistently over budget every single month with no meaningful
+improvement. That is not a one-time event — it is a structural overspend that
+someone either approved and did not communicate or has not noticed yet. Sales
+is volatile, swinging above and below budget month to month, which is consistent
+with a variable commission structure tied to deal timing. Customer Success has
+been running under all year but is trending toward breakeven by December. Cross
+referenced with their attrition rate that trend is worth watching — if they
+start backfilling roles aggressively that underspend will flip quickly.
 
 # Headcount & Labor Cost Analysis
 
-Labor is almost always the largest expense line in a business, often 60 to 70 percent of total OpEx. Understanding who we have, what they cost, and whether we are retaining them is non-negotiable on Day 1. The headcount data also connects directly back to what we just saw in the budget variance section, as departments that are overspending or understaffed show up here too.
+Labor is almost always the largest expense line in a business, often 60 to 70
+percent of total OpEx. Understanding who we have, what they cost, and whether
+we are retaining them is non-negotiable on day one. The headcount data also
+connects directly back to what we just saw in the budget variance section.
+Departments that are overspending or understaffed do not exist in isolation —
+they show up here too.
+
+The table below is the starting point. Before I build any charts I want to see
+the raw numbers — headcount, salary, tenure, open roles, and attrition — all
+in one place.
 
 ```{r headcount-table}
 headcount_display <- headcount %>% 
@@ -392,6 +556,19 @@ headcount_display %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE)
 ```
+
+A few things jump out immediately. Engineering is by far the largest cost center
+at $4.4 million fully loaded annually and has the most open roles at 5. G&A has
+the highest average tenure at 4.2 years which makes sense — finance, legal, and
+HR tend to be stable functions. Customer Success has the lowest average salary
+at $68,000 and the highest attrition at 25%. That combination is worth pausing
+on. The people responsible for keeping customers happy are the least compensated
+and the most likely to leave. The two charts below break this down further.
+
+The first view compares fully loaded labor cost across departments. The second
+looks at attrition rate with a threshold line at 18% — departments above that
+line are losing people at a rate that creates real operational risk.
+
 ```{r headcount-charts}
 
 p_hc1 <- headcount %>% 
@@ -404,7 +581,7 @@ p_hc1 <- headcount %>%
   coord_flip() +
   scale_y_continuous(labels = dollar_format(scale = 1e-6, suffix = "M"),
                      limits = c(0, max(headcount$fully_loaded) * 1.35)) +
-  scale_fill_manual(values = pallete_dept, guide = "none") +
+  scale_fill_manual(values = palette_dept, guide = "none") +
   labs(
     title = "Fully Loaded Labor Cost",
     subtitle = "Base Salary * 1.25",
@@ -437,6 +614,19 @@ p_hc1 + p_hc2
 
 ```
 
+Engineering dominates the cost chart which is expected given the combination of
+headcount and salary. What stands out on the attrition chart is that three of
+five departments are at or above the 18% threshold. That is not a one department
+problem — it is a company wide retention issue that finance leadership needs to
+be aware of.
+
+The bar charts show each dimension separately. This next view combines them.
+The goal is to find departments where high cost and high attrition overlap —
+because that is where the business is taking the most financial risk. Every
+person who leaves has to be replaced, and replacement costs typically run 50
+to 100 percent of annual salary when you account for recruiting, onboarding,
+and lost productivity.
+
 ```{r headcount-scatter}
 headcount %>% 
   ggplot(aes(x = attrition_rate, y = avg_salary,
@@ -455,7 +645,7 @@ headcount %>%
            color = "grey50", size = 3) +
   scale_x_continuous(labels = percent_format(), limits = c(0.07, .28)) +
   scale_y_continuous(labels = dollar_format(), limits = c(NA, 125000)) +
-  scale_color_manual(values = pallete_dept, guide = "none") +
+  scale_color_manual(values = palette_dept, guide = "none") +
   scale_size(range = c(3,10), guide = "none") +
   labs(
     title = "Attrition Rate vs. Average Salary",
@@ -467,11 +657,27 @@ headcount %>%
   
 ```
 
+Engineering sits in the top left — expensive but well retained. That is the
+ideal position. G&A sits in the bottom left — lower cost and stable. Customer
+Success sits in the bottom right — lower salary but the highest attrition in
+the company. That is the danger quadrant. You are not paying a lot per person
+but you are cycling through people constantly in a role where relationship
+continuity directly affects whether customers stay or leave. Marketing is also
+above the attrition threshold and above average salary which makes it the
+second most concerning department from a retention standpoint. Sales sits right
+on the threshold — worth watching but not yet a red flag on its own.
+
 # Unit Economics
 
-This is the section most junior analysts skip. Unit economics live at the intersection of finance, product, and operations and understanding them tells you whether the growth we saw in the revenue section is actually sustainable. A business can grow revenue every month and still be destroying value if it costs more to acquire and serve a customer than that customer is ever going to return.
+This is the section most junior analysts skip. Unit economics live at the
+intersection of finance, product, and operations and understanding them tells
+you whether the growth we saw in the revenue section is actually sustainable.
+A business can grow revenue every month and still be destroying value if it
+costs more to acquire and serve a customer than that customer is ever going
+to return. The summary table below gives me a snapshot of where things stand
+at the end of the period.
 
-```{r unit-econ-latest}
+```{r unit-econ-latest, results = 'hide'}
 latest <- unit_econ %>% 
   slice_tail(n = 1)
 
@@ -519,7 +725,20 @@ unit_econ_display %>%
                 full_width = FALSE)
 
 ```
-CAC has actually been declining over the period which is an encouraging sign. The business is getting more efficient at acquiring customers, likely through improving sales processes or better marketing targeting. The question I would ask is whether this is intentional or whether we are just picking lower hanging fruit and deferring the harder prospects for later.
+
+The LTV to CAC ratio at 2.56 is the number that concerns me most. It is below
+the 3x threshold that most operators treat as the minimum for a healthy
+acquisition engine. That means for every dollar we spend acquiring a customer
+we are getting back roughly $2.56 in lifetime value. That is not catastrophic
+but it is not comfortable either. The three charts below tell me how we got
+here and where things are heading.
+
+Customer acquisition cost tells me how efficiently the sales and marketing
+machine is converting spend into new customers. If CAC is rising it means we
+are working harder and spending more to win the same number of accounts. If it
+is falling it means we are getting more efficient. The trend over 24 months
+tells a more honest story than any single month.
+
 ```{r cac-chart}
 
 unit_econ %>% 
@@ -539,7 +758,19 @@ unit_econ %>%
 
 ```
 
-CAC declining is good news. But CAC alone does not tell the full story. What matters is whether the value of a customer over their lifetime justifies what we spent to acquire them. That is the LTV:CAC ratio and it is the single most important unit economics metric for understanding the health of the growth engine.
+CAC has been declining over the period which is an encouraging sign. The
+business is getting more efficient at acquiring customers, likely through
+improving sales processes, better marketing targeting, or both. The question
+I would ask is whether this is intentional or whether we are simply picking
+lower hanging fruit and deferring the harder prospects for later. Declining
+CAC that is driven by cherry picking easy deals will reverse the moment those
+deals run out.
+
+CAC declining is good news but it does not tell the full story on its own.
+What matters is whether the value of a customer over their lifetime justifies
+what we spent to acquire them. That is the LTV to CAC ratio and it is the
+single most important unit economics metric for understanding the health of
+the growth engine.
 
 ```{r ltv-cac-chart}
 unit_econ %>% 
@@ -564,9 +795,21 @@ unit_econ %>%
   theme_ba()
 ```
 
-The ratio has been volatile across the period and is currently sitting at 2.56, below the 3x threshold. That is not a comfortable place to be. ARPU is declining as we bring on smaller accounts and CAC is only declining modestly. The gap is closing in the wrong direction. This is the conversation I am walking into on day two.
+The ratio has been volatile across the period and is currently sitting at 2.56
+which puts us below the 3x threshold. ARPU is declining as we bring on smaller
+accounts and CAC is only declining modestly. The gap is closing in the wrong
+direction. This is not a crisis today but it is the conversation I am walking
+into on day two. If this trend continues for another two or three quarters the
+business will need to either raise prices, reduce acquisition costs, or improve
+retention to get the ratio back above 3x.
 
-The last unit economics view is churn. Every percentage point of monthly churn compounds. At 2% monthly you lose roughly 22% of your customer base annually. At 3% that number climbs to 31%. The question is not just where churn is today but where it has been and what direction it is moving.
+The last unit economics view is churn. Every percentage point of monthly churn
+compounds. At 2% monthly you lose roughly 22% of your customer base annually.
+At 3% that number climbs to 31%. Churn is the leaky bucket underneath all the
+growth numbers we looked at in section three and it connects directly to the
+Customer Success attrition problem we flagged in section five. The question is
+not just where churn is today but where it has been and what direction it is
+moving.
 
 ```{r churn-chart}
 unit_econ %>%
@@ -590,7 +833,15 @@ unit_econ %>%
   ) +
   theme_ba()
 ```
-Churn started well above 5% in early 2023 which is a serious problem for any business. The encouraging news is the trend is consistently downward and by late 2024 we are approaching the 2% monthly benchmark. That kind of improvement does not happen by accident. Something changed, whether that was a CS process improvement, a product fix, or a change in the customer mix. I would want to know exactly what drove it because whatever it was we should be doing more of it.
+
+Churn started well above 5% in early 2023 which is a serious problem for any
+subscription business. The encouraging news is the trend is consistently
+downward and by late 2024 we are approaching the 2% monthly benchmark. That
+kind of sustained improvement does not happen by accident. Something changed —
+whether that was a CS process improvement, a product fix, or a change in the
+customer mix. I would want to know exactly what drove it because whatever it
+was we should be doing more of it. The concern is that with CS attrition at
+25% the people who drove that improvement may not all still be here.
 
 # Executive Summary
 
@@ -645,24 +896,31 @@ Signal = c(
 ```
 **What looks healthy:**
 
-Revenue is growing and gross margin is improving. The core business model is
-working. Churn has dropped significantly over two years which is the most
-encouraging trend in the whole analysis.
+Revenue is growing at 13.5% year over year and gross margin is averaging above
+48% across the period, though the latest month came in at 46.9% which is worth
+monitoring. The core business model is working — we are delivering the product
+at a reasonable cost and growing the top line. The churn improvement from above
+5% to near 2% over two years is the most encouraging trend in the whole analysis
+and suggests the product and customer success teams have made real progress on
+retention.
 
 **What I am watching:**
 
-EBITDA margin is thin and has been negative in several months. The business
-is not yet consistently profitable at the operating level. Engineering is
-running under budget but has 5 open roles. That underspend is not savings,
-it is deferred cost that will show up the moment those roles get filled.
+EBITDA margin is thin and has dipped negative in several months. The business
+is not consistently profitable at the operating level and there is not much
+cushion if revenue softens or costs spike. Engineering has 5 open roles and
+is running under budget — that underspend is not savings, it is deferred cost
+that will hit the moment hiring accelerates.
 
 **What I am flagging for week one conversations:**
 
-Marketing is 13.2% over budget with no sign of the gap closing. I want to
-understand whether that spend is approved and whether it is producing results
-in the acquisition numbers. Customer Success has a 25% attrition rate and is
-running under budget simultaneously. That combination concerns me more than
-any other single data point in this analysis. High CS attrition means
-relationship continuity breaks down, which means churn risk goes up, which
-means the LTV:CAC ratio that is already below 3x gets worse. These things
-are connected and I want to map that connection before I build anything else.
+Marketing is 13.2% over budget every single month with no sign of the gap
+closing. I want to understand whether that spend was approved and whether it
+is producing results in the new customer numbers. Customer Success has a 25%
+attrition rate, 2 open roles, and is running under budget simultaneously. That
+is the data point that concerns me most. The churn improvement we just saw was
+almost certainly driven by CS team efforts. If the people who built that
+improvement keep leaving, churn will reverse. The LTV to CAC ratio at 2.56 is
+already below the 3x threshold. A churn reversal would make that worse. These
+three things — CS attrition, churn trajectory, and LTV to CAC — are connected
+and mapping that connection is the first thing I am building on day two.
